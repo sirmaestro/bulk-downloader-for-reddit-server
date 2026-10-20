@@ -257,3 +257,13 @@ def test_known_duplicates(server, tmp_path: Path):
     connection.close()
     result = call(base, "POST", "/known", {"folder": "someone", "ids": ["dup123", "new123"]})[1]
     assert result["duplicates"] == ["dup123"] and result["known"] == []
+
+
+def test_user_job_starts_below_the_page(server):
+    _, base = server
+    _, job = call(base, "POST", "/jobs", {"folder": "someone", "user": "someone", "posts": [], "before": 1792210918})
+    assert wait_for(base, job["id"])["state"] == "done"
+    args, _ = FakeDownloader.runs[0]
+    assert args.listing_before == 1792210918
+    for bad in ("1792210918", -5, True, 1.5):
+        assert call(base, "POST", "/jobs", {"folder": "someone", "user": "someone", "before": bad})[0] == 400

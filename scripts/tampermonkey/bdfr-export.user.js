@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.0
+// @version      4.1
 // @description  Downloads the posts on old.reddit pages through a local `bdfr serve`, or collects them as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @grant        GM_getValue
@@ -456,7 +456,11 @@
             if (readArchive) {
                 body.user = page.user;
                 if (fullArchive) body.archive = "all";
-                note = fullArchive ? "and the whole archive" : "and newer posts from the archive";
+                // The page's posts are already in hand, so the archive is only read below the oldest of them
+                const oldest = oldestOwnPost(false);
+                if (oldest && oldest.created_utc) body.before = oldest.created_utc;
+                note = (fullArchive ? "and the whole archive" : "and newer posts from the archive")
+                    + (body.before ? " before it" : "");
             }
             await startJob(body, note);
         } finally {
@@ -467,11 +471,16 @@
     // Whether the oldest of the user's posts on the page (leaving out ignored ones) is already downloaded. Arctic
     // Shift is behind Reddit, so it can't have anything newer than the page; it can only add posts older than it.
     function pageReachesDownloaded() {
-        const own = postsOnPage().filter((post) => state[post.id] !== "ignored"
-            && (post.author || "").toLowerCase() === page.user.toLowerCase());
-        if (!own.length) return false;
-        const oldest = own.reduce((a, b) => ((a.created_utc || 0) <= (b.created_utc || 0) ? a : b));
-        return ["existing", "duplicate"].includes(state[oldest.id]);
+        const oldest = oldestOwnPost(true);
+        return Boolean(oldest) && ["existing", "duplicate"].includes(state[oldest.id]);
+    }
+
+    // The oldest of the user's posts on the page, optionally leaving out ignored ones (self posts, crossposts)
+    function oldestOwnPost(withoutIgnored) {
+        const own = postsOnPage().filter((post) => (!withoutIgnored || state[post.id] !== "ignored")
+            && post.created_utc && (post.author || "").toLowerCase() === page.user.toLowerCase());
+        if (!own.length) return null;
+        return own.reduce((a, b) => (a.created_utc <= b.created_utc ? a : b));
     }
 
     function watchJob(jobId) {

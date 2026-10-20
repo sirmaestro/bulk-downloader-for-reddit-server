@@ -48,6 +48,7 @@ class Job:
         posts: Optional[list[dict]] = None,
         user: Optional[str] = None,
         full_archive: bool = False,
+        before: Optional[int] = None,
     ):
         self.id = job_id
         self.folder = folder
@@ -55,6 +56,9 @@ class Job:
         self.user = user
         # With a user: read their whole archive, not only until already-downloaded posts
         self.full_archive = full_archive
+        # With a user: only read the listing below this time (the oldest post on the page), since the page's posts
+        # are already in hand
+        self.before = before
         self.state = "queued"
         self.error: Optional[str] = None
         self.counts = {label: 0 for label in LABELS}
@@ -188,7 +192,10 @@ class DownloadServer:
             posts = [post for post in posts if isinstance(post, dict) and post.get("id")]
         if user is not None and (not isinstance(user, str) or not USER_PATTERN.fullmatch(user)):
             raise ValueError("'user' must be a Reddit username")
-        job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all")
+        before = payload.get("before")
+        if before is not None and (not isinstance(before, int) or isinstance(before, bool) or before <= 0):
+            raise ValueError("'before' must be a time in seconds since 1970")
+        job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all", before)
         with self._lock:
             self.jobs[job.id] = job
             finished = [j for j in self.jobs.values() if j.finished]
@@ -239,6 +246,7 @@ class DownloadServer:
             args.user = [job.user]
             args.submitted = True
             args.stop_at_existing = 0 if job.full_archive else (args.stop_at_existing or 5)
+            args.listing_before = job.before
 
         root_logger = logging.getLogger()
         handlers_before = list(root_logger.handlers)
@@ -295,6 +303,8 @@ class DownloadServer:
     def _describe(self, job: Job) -> str:
         if job.user:
             source = f"{'all archived' if job.full_archive else 'new'} posts by u/{job.user}"
+            if job.before:
+                source += f" older than {time.strftime('%Y-%m-%d %H:%M', time.localtime(job.before))}"
             source += f" (with {len(job.posts)} from the page)" if job.posts else ""
         else:
             source = f"{len(job.posts)} posts from a page"

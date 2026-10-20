@@ -144,3 +144,11 @@ def test_read_post_json_formats(tmp_path: Path):
     assert set(posts) == {"a", "b"}
     assert posts["a"]["score"] == 5 and posts["a"]["title"] == "title a"
     assert "url" not in posts["b"]
+
+
+def test_submissions_before(arctic_shift: ArcticShift):
+    arctic_shift.session.get.side_effect = [make_response([make_post("b", 200), make_post("a", 100)]), make_response([])]
+    assert [s.id for s in arctic_shift.submissions(author="someone", before=250)] == ["b", "a"]
+    first, second = (call.kwargs["params"] for call in arctic_shift.session.get.call_args_list)
+    assert first["before"] == 250
+    assert second["before"] == 101

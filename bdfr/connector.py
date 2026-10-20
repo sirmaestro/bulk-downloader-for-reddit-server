@@ -381,7 +381,11 @@ class RedditConnector(metaclass=ABCMeta):
                 logger.warning("At least one user must be supplied to download user data")
             for user in self.args.user:
                 logger.debug(f"Retrieving submitted posts of user {user} via Arctic Shift")
-                out.append(self.arctic_shift.submissions(author=user, limit=self.args.limit, after=after))
+                out.append(
+                    self.arctic_shift.submissions(
+                        author=user, limit=self.args.limit, after=after, before=self.args.listing_before
+                    )
+                )
 
         posts = {post["id"]: post for post in self.exported_posts}
         for link in self.args.link:

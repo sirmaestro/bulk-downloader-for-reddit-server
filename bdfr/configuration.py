@@ -44,6 +44,8 @@ class Configuration(Namespace):
         self.stop_at_existing: int = 0
         self.parallel: int = 1
         self.media_only: bool = False
+        # Not an option: set by `bdfr serve` so a user's listing starts below the posts the page already sent
+        self.listing_before: Optional[int] = None
         self.rename_existing: bool = False
         # None picks the command's default: arctic-shift for download, reddit for archive and clone
         self.source: Optional[str] = None

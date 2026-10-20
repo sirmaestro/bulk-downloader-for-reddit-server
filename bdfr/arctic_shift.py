@@ -49,14 +49,17 @@ class ArcticShift:
         self._last_request = 0.0
 
     def submissions(
-        self, limit: Optional[int] = None, after: Optional[int] = None, **query: str
+        self, limit: Optional[int] = None, after: Optional[int] = None, before: Optional[int] = None, **query: str
     ) -> Iterator[praw.models.Submission]:
-        """Yields submissions newest first for a query such as author=name or subreddit=name"""
+        """Yields submissions newest first for a query such as author=name or subreddit=name, created after `after`
+        and before `before` (epoch seconds) when given"""
         params = dict(query, sort="desc")
         # 'auto' lets the server return as many posts as it can in one request, usually more than the fixed maximum
         params["limit"] = limit if limit and limit <= self.MAX_PAGE_SIZE else "auto"
         if after:
             params["after"] = after
+        if before:
+            params["before"] = before
         seen = set()
         while True:
             page = self._get("posts/search", dict(params))
