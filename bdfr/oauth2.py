@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import configparser
 import logging
 import random
 import re
 import socket
-from pathlib import Path
 
 import praw
 import requests

@@ -35,9 +35,9 @@ class SelfPost(BaseDownloader):
             + self.post.selftext
             + "\n\n---\n\n"
             + "submitted to [r/"
-            + self.post.subreddit.title
+            + self.post.subreddit.display_name
             + "](https://www.reddit.com/r/"
-            + self.post.subreddit.title
+            + self.post.subreddit.display_name
             + ") by [u/"
             + (self.post.author.name if self.post.author else "DELETED")
             + "](https://www.reddit.com/user/"

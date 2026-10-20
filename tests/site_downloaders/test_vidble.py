@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.resource import Resource
 from bdfr.site_downloaders.vidble import Vidble
 
@@ -89,7 +90,7 @@ def test_get_links(test_url: str, expected: set[str]):
 def test_find_resources(test_url: str, expected_hashes: set[str]):
     mock_download = Mock()
     mock_download.url = test_url
-    downloader = Vidble(mock_download)
+    downloader = Vidble(mock_download, Configuration())
     results = downloader.find_resources()
     assert all([isinstance(res, Resource) for res in results])
     [res.download() for res in results]

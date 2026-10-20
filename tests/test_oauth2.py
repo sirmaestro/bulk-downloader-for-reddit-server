@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import configparser
-from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 

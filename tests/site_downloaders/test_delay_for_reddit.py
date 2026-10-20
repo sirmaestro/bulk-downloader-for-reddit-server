@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.resource import Resource
 from bdfr.site_downloaders.delay_for_reddit import DelayForReddit
 
@@ -20,7 +21,7 @@ from bdfr.site_downloaders.delay_for_reddit import DelayForReddit
 def test_download_resource(test_url: str, expected_hash: str):
     mock_submission = Mock()
     mock_submission.url = test_url
-    test_site = DelayForReddit(mock_submission)
+    test_site = DelayForReddit(mock_submission, Configuration())
     resources = test_site.find_resources()
     assert len(resources) == 1
     assert isinstance(resources[0], Resource)

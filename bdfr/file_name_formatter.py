@@ -131,12 +131,9 @@ class FileNameFormatter:
             raise BulkDownloaderException(f"Resource from {resource.url} has no extension")
         file_name = str(self._format_name(resource.source_submission, self.file_format_string))
 
-        file_name = re.sub(r"\n", " ", file_name)
-
-        if not re.match(r".*\.$", file_name) and not re.match(r"^\..*", resource.extension):
-            ending = index + "." + resource.extension
-        else:
-            ending = index + resource.extension
+        # Titles can end in dots or spaces, which would run into the extension when the title ends the name
+        file_name = re.sub(r"\n", " ", file_name).rstrip(". ")
+        ending = index + "." + resource.extension.lstrip(".")
 
         try:
             file_path = self.limit_file_name_length(file_name, ending, subfolder)
@@ -216,7 +213,7 @@ class FileNameFormatter:
             return False
 
     @staticmethod
-    def _format_for_windows(input_string: str, filename_character_set) -> str:
+    def _format_for_windows(input_string: str, filename_character_set: Optional[str] = None) -> str:
         invalid_characters = r'<>:"\/|?*'
         for char in invalid_characters:
             input_string = input_string.replace(char, "")

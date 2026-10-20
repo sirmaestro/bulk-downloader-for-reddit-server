@@ -4,6 +4,7 @@
 import praw
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.resource import Resource
 from bdfr.site_downloaders.self_post import SelfPost
 
@@ -20,7 +21,7 @@ from bdfr.site_downloaders.self_post import SelfPost
 )
 def test_find_resource(test_submission_id: str, expected_hash: str, reddit_instance: praw.Reddit):
     submission = reddit_instance.submission(id=test_submission_id)
-    downloader = SelfPost(submission)
+    downloader = SelfPost(submission, Configuration())
     results = downloader.find_resources()
     assert len(results) == 1
     assert isinstance(results[0], Resource)

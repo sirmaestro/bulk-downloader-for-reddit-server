@@ -32,6 +32,8 @@ def downloader_mock(args: Configuration):
     downloader_mock._sanitise_subreddit_name = RedditConnector.sanitise_subreddit_name
     downloader_mock._split_args_input = RedditConnector.split_args_input
     downloader_mock.master_hash_list = {}
+    downloader_mock._post_link_known.return_value = False
+    downloader_mock._post_id_known.return_value = False
     return downloader_mock
 
 
@@ -122,8 +124,8 @@ def test_file_creation_date(
 
 
 def test_search_existing_files():
-    results = RedditDownloader.scan_existing_files(Path())
-    assert len(results.keys()) != 0
+    hashes, _, _ = RedditDownloader.scan_existing_files(Path(), False)
+    assert len(hashes) != 0
 
 
 @pytest.mark.online

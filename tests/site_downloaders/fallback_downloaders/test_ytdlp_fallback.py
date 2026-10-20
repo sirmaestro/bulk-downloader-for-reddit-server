@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.exceptions import NotADownloadableLinkError
 from bdfr.resource import Resource
 from bdfr.site_downloaders.fallback_downloaders.ytdlp_fallback import YtdlpFallback
@@ -50,7 +51,7 @@ def test_info_extraction_bad(test_url: str):
 def test_find_resources(test_url: str, expected_hash: str):
     test_submission = MagicMock()
     test_submission.url = test_url
-    downloader = YtdlpFallback(test_submission)
+    downloader = YtdlpFallback(test_submission, Configuration())
     resources = downloader.find_resources()
     assert len(resources) == 1
     assert isinstance(resources[0], Resource)

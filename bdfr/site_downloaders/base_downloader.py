@@ -30,7 +30,7 @@ class BaseDownloader(ABC):
     @staticmethod
     def retrieve_url(url: str, cookies: dict = None, headers: dict = None) -> requests.Response:
         try:
-            res = requests.get(url, cookies=cookies, headers=headers)
+            res = requests.get(url, cookies=cookies, headers=headers, timeout=60)
         except requests.exceptions.RequestException as e:
             logger.exception(e)
             raise SiteDownloaderError(f"Failed to get page {url}")

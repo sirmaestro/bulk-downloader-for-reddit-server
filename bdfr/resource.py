@@ -29,9 +29,6 @@ class Resource:
         if not self.extension:
             self.extension = self._determine_extension()
 
-    def url(self):
-        return self.url
-
     @staticmethod
     def retry_download(url: str) -> Callable:
         return lambda global_params: Resource.http_download(url, global_params)
@@ -72,7 +69,7 @@ class Resource:
             max_wait_time = 300 if not fail_fast else 10
         while True:
             try:
-                response = requests.get(url, headers=headers)
+                response = requests.get(url, headers=headers, timeout=120)
                 if re.match(r"^2\d{2}", str(response.status_code)) and response.content:
                     return response.content
                 elif response.status_code in (408, 429):

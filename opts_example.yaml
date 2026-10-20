@@ -1,9 +1,15 @@
-skip: [mp4, avi, mov]
-file_scheme: "{UPVOTES}_{REDDITOR}_{POSTID}_{DATE}"
-limit: 10
-sort: top
-time: all
-no_dupes: true
+# Example for --opts: any command line option, with dashes written as underscores
+source: arctic-shift
+user:
+  - example_user
+submitted: true
 subreddit:
   - EarthPorn
   - CityPorn
+stop_at_existing: 5
+skip: [avi, mov]
+file_scheme: "{REDDITOR}_{TITLE}_{POSTID}"
+filename_character_set: unicode_no_emojis
+no_dupes: true
+search_existing: true
+keep_hashes_db: true

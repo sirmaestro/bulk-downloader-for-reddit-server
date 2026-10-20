@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.site_downloaders.erome import Erome
 
 
@@ -47,7 +48,7 @@ def test_download_resource(test_url: str, expected_hashes_len: int):
     # will change back and forth randomly
     mock_submission = MagicMock()
     mock_submission.url = test_url
-    test_site = Erome(mock_submission)
+    test_site = Erome(mock_submission, Configuration())
     resources = test_site.find_resources()
     for res in resources:
         res.download()

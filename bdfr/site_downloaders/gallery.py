@@ -15,6 +15,17 @@ from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__)
 
+# Reddit's removed_by_category values
+REMOVED = {
+    "deleted": "deleted by its author",
+    "author": "deleted by its author",
+    "moderator": "removed by a moderator",
+    "reddit": "removed by Reddit",
+    "automod_filtered": "removed by AutoModerator",
+    "copyright_takedown": "removed for copyright",
+    "content_takedown": "removed by Reddit",
+}
+
 
 class Gallery(BaseDownloader):
     def __init__(self, post: Submission, args: Configuration):
@@ -27,8 +38,11 @@ class Gallery(BaseDownloader):
             try:
                 image_urls = self._get_links(self.post.crosspost_parent_list[0]["gallery_data"]["items"])
             except (AttributeError, IndexError, TypeError, KeyError):
-                logger.error(f"Could not find gallery data in submission {self.post.id}")
-                logger.exception("Gallery image find failure")
+                # Reddit drops the image list of removed posts
+                removed = getattr(self.post, "removed_by_category", None)
+                if removed:
+                    raise SiteDownloaderError(REMOVED.get(removed, f"removed ({removed.replace('_', ' ')})"))
+                logger.debug(f"Could not find gallery data in submission {self.post.id}")
                 raise SiteDownloaderError("No images found in Reddit gallery")
 
         if not image_urls:
@@ -43,7 +57,7 @@ class Gallery(BaseDownloader):
             possible_extensions = (".jpg", ".png", ".gif", ".gifv", ".jpeg")
             for extension in possible_extensions:
                 test_url = f"https://i.redd.it/{image_id}{extension}"
-                response = requests.head(test_url)
+                response = requests.head(test_url, timeout=30)
                 if response.status_code == 200:
                     out.append(test_url)
                     break

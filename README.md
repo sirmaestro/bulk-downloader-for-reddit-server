@@ -1,437 +1,229 @@
-## Notes
+# Bulk Downloader for Reddit (saved-hashes fork)
 
-This version is always the original version plus the following additions:
-  - [new-option-to-reuse-hashes](../../commits/new-option-to-save-hashes)
-  - [use-hashes-for-metadata-too](../../commits/use-hashes-for-metadata-too)
-  - [new-options-ignore-score-and-no-comments](../../new-options-ignore-score-and-no-comments)
-  - [new-option-filename-character-set](../../new-option-filename-character-set)
-  - [fail-fast-or-immediately](../../fail-fast-or-immediately)
-  - [hash-url-list-and-others](../../hash-url-list-and-others)
+A fork of [Bulk Downloader for Reddit](https://github.com/aliparlakci/bulk-downloader-for-reddit) (BDFR) built for keeping folders of Reddit media up to date: run it regularly and it fetches what's new, skipping what you already have.
 
-It behaves exactly like the original version if you ommit the new options.
-But compare your use case before using this version. If you don't need these new options just use the [original version](https://github.com/Serene-Arc/bulk-downloader-for-reddit).
+**Reddit's API is closed to personal scripts.** Since November 2025, Reddit has required approval for API access and rejects personal tools, so upstream BDFR gets HTTP 403 errors. This fork reads posts from the [Arctic Shift](https://arctic-shift.photon-reddit.com) archive of Reddit instead, and downloads the media from where it is hosted (i.redd.it, v.redd.it, Redgifs, Imgur and so on). Features that only work through Reddit's API are [deprecated](#deprecated-reddit-api-features).
 
-### Use Case
+What this fork adds over upstream:
 
-I have a list of subreddits which I want to update regularly to get new submissions. Old submissions remain in the folder and new ones are added by the current run.
-
-Although duplicate media files cannot be detected before downloading (by Reddits nature and the BDfR app) I don't like new files with same content to be created and therefore use the options `--no-dupes` and `--search-existing`.
-For `--no-dupes` to be efficient the `--search-existing` is needed, but reading and hashing every file in an ever growing data folder over and over again is quite nonsense. The new option `--keep-hashes` saves them for the next run.
-
-I'm also not interested in totally up-to-date values for `score` and `upvote_ratio`, hence the new parameter `--ignore-score`. Additionally I'm only interested in the main submission and not any comments, hence the new parameter `--no-comments`.
-
-I don't share the assumption that Windows cannot handle unicode filenames properly. Therefore I give Windows users unicode characters and optionally emojis back. The new option `--filename-character-set` was born.
-
-### New Options
-
-#### --keep-hashes
-
-This option saves the hashes to three files `hash_list.json`, `hash_file_list.json` and `hash_url_list.json` for the next run. On the next run they are loaded and updated with newly found files in the folder, if any. So it complements the option `--search-existing` and makes the workflow much more efficient.
-If the contents of your files regularly change outside these runs for any reason, don't use it as it is not searching for modified files locally. If it's an intended one time change you can just drop the two json files `hash_list.json` and `hash_file_list.json` and start with a full scan again.
-Obviously, if you use this option, you shouldn't run multiple instances concurrently to download to the same folder.
-
-#### --keep-hashes-db
-
-This option saves the hashes in a SQLite database instead of in the three mentioned files.
-If both the `--keep-hashes` and `--keep-hashes-db` options are specified, the hash files are converted to a db file once. After that, always use the new `--keep-hashes-db` option.
-
-#### --save-hashes-interval
-
-By default, the hash list files are loaded at start and written at the end. As BDFR can be unexpectedly interrupted, you can specify after how many added hashes the files are additionally written to disk. Specify a value between 10 and 1000.
-
-#### --ignore-score
-
-  - This option will ignore the values `score` and `upvote-ratio` for hashing, resulting in less updates of the submission data files
-  - Scores on comments, new comments and so on are still counted as update and the new data is written to disk
-
-#### --no-comments
-
-  - Leaves out all the comments of a submission
-  - If this option is used, a faster way of submission download will be used that is especially fast if using the `--include-id-file` option.
-
-#### --filename-character-set
-
-  - This option defines the character set of the filenames
-  - It is only applied on windows systems or with restriction scheme set to windows
-  - The following options are available: ascii (default), unicode and unicode_no_emojis
-
-#### --fail-fast
-
-When a download error occurs, it will only wait 5 seconds and do one retry (by default it waits 60 seconds multiple times). In case of a "[Errno 11001] getaddrinfo failed" or "[WinError 10061] No connection could be made because the target machine actively refused it" error, it fails immediately.
-
-#### --imgur-originals
-
-  - This option downloads the original links (e.g. GIFs) instead of converted MP4 files.
-
-#### --imgur-fix404
-
-  - If the original downloader fails with a 404, this option tries to download the GIF/MP4 directly.
-
-### How to install this version?
-
-Follow the steps in the first two boxes of the official documentation ["Preparing the environment for development"](docs/CONTRIBUTING.md#preparing-the-environment-for-development).
-If you are familiar with git or an alternative use "git clone" else skip the first line and extract the files from the zip file downloaded here.
-
-### How to update this version?
-
-Each time you want to update your version just replace the files in your folder, either with git or a newly downloaded zip file.
-
-<br><br>
-(original)
-
----
-
-# Bulk Downloader for Reddit
-
-[![PyPI Status](https://img.shields.io/pypi/status/bdfr?logo=PyPI)](https://pypi.python.org/pypi/bdfr)
-[![PyPI version](https://img.shields.io/pypi/v/bdfr.svg?logo=PyPI)](https://pypi.python.org/pypi/bdfr)
-[![PyPI downloads](https://img.shields.io/pypi/dm/bdfr?logo=PyPI)](https://pypi.python.org/pypi/bdfr)
-[![AUR version](https://img.shields.io/aur/version/python-bdfr?logo=Arch%20Linux)](https://aur.archlinux.org/packages/python-bdfr)
-[![Python Test](https://github.com/Serene-Arc/bulk-downloader-for-reddit/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/Serene-Arc/bulk-downloader-for-reddit/actions/workflows/test.yml)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg?logo=Python)](https://github.com/psf/black)
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
-
-This is a tool to download submissions or submission data from Reddit. It can be used to archive data or even crawl Reddit to gather research data. The BDFR is flexible and can be used in scripts if needed through an extensive command-line interface. [List of currently supported sources](#list-of-currently-supported-sources)
-
-If you wish to open an issue, please read [the guide on opening issues](docs/CONTRIBUTING.md#opening-an-issue) to ensure that your issue is clear and contains everything it needs to for the developers to investigate.
-
-Included in this README are a few example Bash tricks to get certain behaviour. For that, see [Common Command Tricks](#common-command-tricks).
+- Reading posts from Arctic Shift (`--source`, the default) or from JSON exported in the browser (`--post-json`)
+- Duplicate detection that survives between runs: hashes kept in JSON files (`--keep-hashes`) or SQLite (`--keep-hashes-db`), plus the URLs already downloaded
+- Stopping a listing once it reaches media you already have (`--stop-at-existing`)
+- Unicode file names on Windows (`--filename-character-set`), faster failure on network errors (`--fail-fast`) and Imgur tweaks (`--imgur-originals`, `--imgur-fix404`)
 
 ## Installation
 
-*Bulk Downloader for Reddit* needs Python version 3.9 or above. Please update Python before installation to meet the requirement.
-
-Then, you can install it via pip with:
+Needs Python 3.9 or later, and [ffmpeg](https://ffmpeg.org) on `PATH` for Reddit-hosted videos.
 
 ```bash
-python3 -m pip install bdfr --upgrade
+git clone https://github.com/sirmaestro/bulk-downloader-for-reddit_with-saved-hashes.git
+cd bulk-downloader-for-reddit_with-saved-hashes
+python -m pip install -e .
 ```
 
-or via [pipx](https://pypa.github.io/pipx) with:
+This installs the `bdfr` command (or run `python -m bdfr`). To update, run `git pull` in the folder. Don't run `bdfr/__main__.py` directly: Python then imports any other `bdfr` installed from PyPI instead of this fork, and the fork's options are ignored with "Ignoring an unknown CLI argument" warnings.
 
-```bash
-python3 -m pipx install bdfr
-```
-
-**To update BDFR**, run the above command again for pip or `pipx upgrade bdfr` for pipx installations.
-
-**To check your version of BDFR**, run `bdfr --version`
-
-**To install shell completions**, run `bdfr completions`
-
-### AUR Package
-
-If on Arch Linux or derivative operating systems such as Manjaro, the BDFR can be installed through the AUR.
-
-- Latest Release: <https://aur.archlinux.org/packages/python-bdfr>
-- Latest Development Build: <https://aur.archlinux.org/packages/python-bdfr-git>
-
-### Source code
-
-If you want to use the source code or make contributions, refer to [CONTRIBUTING](docs/CONTRIBUTING.md#preparing-the-environment-for-development)
+`bdfr --version` shows the installed version.
 
 ## Usage
 
-The BDFR works by taking submissions from a variety of "sources" from Reddit and then parsing them to download. These sources might be a subreddit, multireddit, a user list, or individual links. These sources are combined and downloaded to disk, according to a naming and organisational scheme defined by the user.
-
-There are three modes to the BDFR: download, archive, and clone. Each one has a command that performs similar but distinct functions. The `download` command will download the resource linked in the Reddit submission, such as the images, video, etc. The `archive` command will download the submission data itself and store it, such as the submission details, upvotes, text, statistics, as and all the comments on that submission. These can then be saved in a data markup language form, such as JSON, XML, or YAML. Lastly, the `clone` command will perform both functions of the previous commands at once and is more efficient than running those commands sequentially.
-
-Note that the `clone` command is not a true, failthful clone of Reddit. It simply retrieves much of the raw data that Reddit provides. To get a true clone of Reddit, another tool such as HTTrack should be used.
-
-After installation, run the program from any directory as shown below:
-
 ```bash
-bdfr download
+# New posts by a user, stopping at ones already downloaded
+bdfr download ./output --user someone --submitted --stop-at-existing 5 --no-dupes --search-existing --keep-hashes-db
+
+# The latest 50 posts in two subreddits from the past week
+bdfr download ./output --subreddit 'pics, aww' -L 50 -t week
+
+# Specific posts
+bdfr download ./output -l 1xa496l -l https://www.reddit.com/r/aww/comments/1xae8q4/
+
+# Posts collected in the browser (see --post-json)
+bdfr download ./output --post-json bdfr-posts-20261020-153000.json
 ```
 
-```bash
-bdfr archive
-```
+Options can also come from a YAML file with `--opts my_opts.yaml`, using the option names with underscores instead of dashes (`file_scheme`, not `file-scheme`); see [opts_example.yaml](opts_example.yaml). Options given more than once on the command line are lists in YAML. Command line options take priority over the file.
 
-```bash
-bdfr clone
-```
+### Keeping a folder up to date
 
-However, these commands are not enough. You should chain parameters in [Options](#options) according to your use case. Don't forget that some parameters can be provided multiple times. Some quick reference commands are:
+For regular runs, combine:
 
-```bash
-bdfr download ./path/to/output --subreddit Python -L 10
-```
+- `--stop-at-existing 5` so each listing stops after 5 already-downloaded posts in a row, which usually means one request to Arctic Shift per user or subreddit
+- `--keep-hashes-db` (or `--keep-hashes`) so downloaded media URLs and file hashes are remembered between runs
+- `--no-dupes` and `--search-existing` so the same media posted again under a different URL isn't saved twice
 
-```bash
-bdfr download ./path/to/output --user reddituser --submitted -L 100
-```
+### Downloading from the browser
 
-```bash
-bdfr download ./path/to/output --user me --saved --authenticate -L 25 --file-scheme '{POSTID}'
-```
+The Tampermonkey script [scripts/tampermonkey/bdfr-export.user.js](scripts/tampermonkey/bdfr-export.user.js) adds a panel to old.reddit.com user pages with a **Download** button and an **Archive** checkbox. The downloading is done by BDFR itself, running in the background with `bdfr serve`, so files go to your folders with all of its duplicate checks.
 
-```bash
-bdfr download ./path/to/output --subreddit 'Python, all, mindustry' -L 10 --make-hard-links
-```
+1. Start the server, giving the folder that holds your per-user or per-subreddit folders and the download options to use for every request:
 
-```bash
-bdfr archive ./path/to/output --user reddituser --submitted --all-comments --comment-context
-```
+    ```bash
+    bdfr serve D:\red
+    ```
 
-```bash
-bdfr archive ./path/to/output --subreddit all --format yaml -L 500 --folder-scheme ''
-```
+    By default `serve` runs as if given `--no-dupes --search-existing --keep-hashes-db --folder-scheme "" --file-scheme "{POSTID}_{TITLE}" --parallel 4 --media-only`: files go straight into each user's folder, named by post ID, with every file's hash kept in that folder's `hashes.sqlite`, duplicates skipped, and self posts and crossposts left out (as the script does). Options given on the command line or in `--opts` override these (in an `--opts` file, flags can be turned off, e.g. `no_dupes: false`), and `--no-defaults` uses the `download` command's defaults instead. `bdfr download` keeps its own defaults.
 
-Alternatively, you can pass options through a YAML file.
+    It listens on `http://127.0.0.1:7635` (change with `--port`) and prints a token, which is also saved as `serve_token.txt` in BDFR's [configuration directory](#configuration). Only programs on your computer can reach it, and every request must carry the token.
 
-```bash
-bdfr download ./path/to/output --opts my_opts.yaml
-```
+2. Install the script in Tampermonkey. The first time you click a button it asks for the server address and token (change them later with **⚙**).
+3. Open a user's page, such as `old.reddit.com/user/someone/submitted`. A small panel appears at the bottom right (it brightens when you hover over it), and posts you already have are marked as the page loads, including posts added by RES's Never Ending Reddit. Click:
+    - **Download** to download the posts on the page that aren't marked yet, into a folder named after the user. When the page may not have everything new, it also reads the user's posts from the Arctic Shift archive, newest first, until 5 already-downloaded posts in a row (`--stop-at-existing`). That happens when the page is empty (the user's posts are hidden or removed on Reddit, but the archive may still have them), or its oldest post isn't downloaded yet, so there may be more beyond it. Arctic Shift is hours behind Reddit, so it can't add anything newer than the page; when the page already reaches posts you have, no archive request is made.
+    - Tick **Archive** (remembered) to have every Download go through the user's whole archive, finding posts that were removed from Reddit or are older than your last download. Posts already in the folder, by ID, link, or as known duplicates, are recognised without any request, so this costs the listing itself: about one request per 60–200 archived posts (e.g. 11 requests for a user with 618 archived posts).
 
-For example, running it with the following file
+What the script sends:
 
-```yaml
-skip: [mp4, avi]
-file_scheme: "{UPVOTES}_{REDDITOR}_{POSTID}_{DATE}"
-limit: 10
-sort: top
-subreddit:
-  - EarthPorn
-  - CityPorn
-```
+- Posts linking straight to media (i.redd.it, v.redd.it, Redgifs, Imgur, ...) are sent as they are on the page; that is all BDFR needs. v.redd.it videos are downloaded from the video's full playlist, in the best quality with sound.
+- Galleries: the page doesn't list a gallery's images, so before sending, the script reads them from Reddit with your browser's login (`old.reddit.com/by_id/…json`, one request for up to 100 galleries). Galleries show ⋯ and the panel says *Reading N galleries from Reddit…* meanwhile. If Reddit doesn't answer, they are sent anyway and BDFR looks them up in Arctic Shift; the panel then shows why next to the job's progress (e.g. *Reddit asked to log in*), and so does the lookup line in `serve_log.txt`. The first time, Tampermonkey asks you to allow the script to connect to old.reddit.com. Details of the failure (Reddit's answer, whether the page is logged in, the script handler) are logged as an error in the browser console (F12), starting `BDFR:`.
+- Self posts, crossposts, links to other Reddit posts and posts missing details on the page are ignored: they are marked – (hover for why) and not sent.
 
-would be equilavent to (take note that in YAML there is `file_scheme` instead of `file-scheme`):
+Marks next to post titles: green ✔ downloaded now, grey ✔ already downloaded, grey ≡ duplicate (the same media as something already downloaded, re-uploaded under another link, so nothing new was written), orange ! skipped (filtered out or failed; the reason is in `serve_log.txt` in the configuration directory), – ignored, ⋯ reading the gallery from Reddit. Already-downloaded posts are found from the post IDs in the file names in the folder (this needs a file scheme containing `{POSTID}`, as serve's default does; old and new names can be mixed in one folder), and from the folder's hash store: a post linking to something already downloaded, such as a repost of the same Redgifs video, is marked too and not sent. Requests are queued and run one at a time. Don't run `bdfr download` into the same folder while the server is working on it.
 
-```bash
-bdfr download ./path/to/output --skip mp4 --skip avi --file-scheme "{UPVOTES}_{REDDITOR}_{POSTID}_{DATE}" -L 10 -S top --subreddit EarthPorn --subreddit CityPorn
-```
+The panel only appears on user pages. To use it on subreddit pages too (downloading into a folder named after the subreddit), set `subredditPages: true` in `SETTINGS` at the top of the script.
 
-Any option that can be specified multiple times should be formatted like subreddit is above.
+On every old.reddit page, links to a user's profile go to their submitted posts, newest first (`old.reddit.com/user/<name>/submitted/?sort=new`), however you open them (click, middle-click, "Open in new tab"). Turn this off with `userLinksToSubmitted: false` in `SETTINGS`.
 
-In case when the same option is specified both in the YAML file and in as a command line argument, the command line argument takes priority
+**Collect** (off until you click it, and remembered after that) makes the script keep every post it sees on the pages you visit. **Export** then saves them as JSON for `--post-json`, and **Clear** forgets them; neither needs the server.
 
 ## Options
 
-The following options are common between both the `archive` and `download` commands of the BDFR.
+### Sources
 
 - `directory`
-    - This is the directory to which the BDFR will download and place all files
-- `--authenticate`
-    - This flag will make the BDFR attempt to use an authenticated Reddit session
-    - See [Authentication](#authentication-and-security) for more details
-- `--config`
-    - If the path to a configuration file is supplied with this option, the BDFR will use the specified config
-    - See [Configuration Files](#configuration) for more details
-- `--opts`
-    - Load options from a YAML file.
-    - Has higher prority than the global config file but lower than command-line arguments.
-    - See [opts_example.yaml](./opts_example.yaml) for an example file.
-- `--disable-module`
-    - Can be specified multiple times
-    - Disables certain modules from being used
-    - See [Disabling Modules](#disabling-modules) for more information and a list of module names
-- `--filename-restriction-scheme`
-    - Can be: `windows`, `linux`
-    - Turns off the OS detection and specifies which system to use when making filenames
-    - See [Filesystem Restrictions](#filesystem-restrictions)
-- `--filename-character-set`
-    - This option defines the character set of the filenames
-    - It is only applied on windows systems or with restriction scheme set to windows
-    - The following options are available:
-        - ascii (default)
-        - unicode
-        - unicode_no_emojis
-- `--ignore-user`
-    - This will add a user to ignore
-    - Can be specified multiple times
-- `--include-id-file`
-    - This will add any submission with the IDs in the files provided
-    - Can be specified multiple times
-    - Format is one ID per line
-- `--log`
-    - This allows one to specify the location of the logfile
-    - This must be done when running multiple instances of the BDFR, see [Multiple Instances](#multiple-instances) below
-- `--saved`
-    - This option will make the BDFR use the supplied user's saved posts list as a download source
-    - This requires an authenticated Reddit instance, using the `--authenticate` flag, as well as `--user` set to `me`
-- `--search`
-    - This will apply the input search term to specific lists when scraping submissions
-    - A search term can only be applied when using the `--subreddit` and `--multireddit` flags
-- `--submitted`
-    - This will use a user's submissions as a source
-    - A user must be specified with `--user`
-- `--upvoted`
-    - This will use a user's upvoted posts as a source of posts to scrape
-    - This requires an authenticated Reddit instance, using the `--authenticate` flag, as well as `--user` set to `me`
-- `-L, --limit`
-    - This is the limit on the number of submissions retrieve
-    - Default is max possible
-    - Note that this limit applies to **each source individually** e.g. if a `--limit` of 10 and three subreddits are provided, then 30 total submissions will be scraped
-    - If it is not supplied, then the BDFR will default to the maximum allowed by Reddit, roughly 1000 posts. **We cannot bypass this.**
-- `-S, --sort`
-    - This is the sort type for each applicable submission source supplied to the BDFR
-    - This option does not apply to upvoted or saved posts when scraping from these sources
-    - The following options are available:
-        - `controversial`
-        - `hot` (default)
-        - `new`
-        - `relevance` (only available when using `--search`)
-        - `rising`
-        - `top`
-- `-l, --link`
-    - This is a direct link to a submission to download, either as a URL or an ID
-    - Can be specified multiple times
-- `-m, --multireddit`
-    - This is the name of a multireddit to add as a source
-    - Can be specified multiple times
-        - This can be done by using `-m` multiple times
-        - Multireddits can also be used to provide CSV multireddits e.g. `-m 'chess, favourites'`
-    - The specified multireddits must all belong to the user specified with the `--user` option
-- `-s, --subreddit`
-    - This adds a subreddit as a source
-    - Can be used mutliple times
-        - This can be done by using `-s` multiple times
-        - Subreddits can also be used to provide CSV subreddits e.g. `-m 'all, python, mindustry'`
-- `-t, --time`
-    - This is the time filter that will be applied to all applicable sources
-    - This option does not apply to upvoted or saved posts when scraping from these sources
-    - This option only applies if sorting by top or controversial.  See --sort for more detail.
-    - The following options are available:
-        - `all` (default)
-        - `hour`
-        - `day`
-        - `week`
-        - `month`
-        - `year`
-    - `--time-format`
-        - This specifies the format of the datetime string that replaces `{DATE}` in file and folder naming schemes
-        - See [Time Formatting Customisation](#time-formatting-customisation) for more details, and the formatting scheme
+    - Where downloads are saved
+- `--source`
+    - Where posts are read from: `arctic-shift` (default) or `reddit` (deprecated)
+    - With `arctic-shift`, listings are always newest first, and nothing is requested from Reddit's API
+    - Arctic Shift keeps posts that were later deleted, so their media may no longer download
+    - The number of requests made to Arctic Shift is logged at the end of each run
 - `-u, --user`
-    - This specifies the user to scrape in concert with other options
-    - When using `--authenticate`, `--user me` can be used to refer to the authenticated user
-    - Can be specified multiple times for multiple users
-        - If downloading a multireddit, only one user can be specified
-- `--fail-fast`
-    - This waits only 5 seconds after a download error and does 1 retry
-    - On errors "[Errno 11001]" and "[WinError 10061]" it fails immediately
-- `-v, --verbose`
-    - Increases the verbosity of the program
-    - Can be specified multiple times
+    - A user to read posts from, with `--submitted`; can be given more than once
+- `--submitted`
+    - Use the posts submitted by each `--user`
+- `-s, --subreddit`
+    - A subreddit to read posts from; can be given more than once or as a comma-separated list, e.g. `-s 'pics, aww'`
+- `-l, --link`
+    - A post to download, as a URL or ID; can be given more than once
+    - With `arctic-shift`, posts are looked up 100 per request
+- `--include-id-file`
+    - Files of post IDs to download, one per line; can be given more than once
+- `--post-json`
+    - JSON files of posts to download; can be given more than once
+    - Made with **Export** in the Tampermonkey script (see [Downloading from the browser](#downloading-from-the-browser)), which collects posts from every old.reddit.com page you visit
+    - Posts linking straight to media, v.redd.it videos and galleries with their `gallery_data` are downloaded from the exported data without any lookup; other galleries, text posts and crossposts are completed from Arctic Shift, 100 per request
+    - Plain lists of posts, Arctic Shift responses and Reddit listing JSON are also accepted
+- `-L, --limit`
+    - The most posts to read from each source, e.g. `-L 10` with three subreddits reads up to 30 posts
+- `-t, --time`
+    - With `arctic-shift`: only posts from the last `hour`, `day`, `week`, `month` or `year`; `all` (default) has no limit
+    - With `reddit`: the time window for `top` and `controversial` sorts
+- `--parallel`
+    - How many posts to download at once, from 1 (default) to 16; 4 is a good start when many posts are videos (Redgifs, v.redd.it)
+    - Only fetching and downloading run side by side: duplicate checks, the hash store and writing files happen one at a time, so duplicates are still caught, and results are reported (and `--stop-at-existing` counted) in listing order
+    - When a listing stops, posts already started are finished, so a few more posts than with `--parallel 1` may be checked
+    - Posts sharing a link (reposts, or the same post twice on a page) download it once: a post whose link another is downloading waits for it, then counts as already downloaded
+- Links already downloaded: with a hash store, the media URL of every download is stored, and for posts with a single file (e.g. Redgifs, v.redd.it, Imgur images) so is the post's own link. A later post with the same link is then recognised as already downloaded without any request, not even to ask Redgifs where the video is. Existing stores gain post links as their posts come up again
+- `--stop-at-existing`
+    - Stops reading a listing after this many already-downloaded posts in a row, then moves on to the next one
+    - A post counts as already downloaded when its files already exist at their destination or, with `--keep-hashes`/`--keep-hashes-db`, its media URLs are already stored. Posts that are filtered out, fail, or turn out to be duplicates by hash don't count either way, since a new post can repost old media
+    - Listings must be newest first, which they always are with `arctic-shift`
+    - Posts given with `--link`, `--include-id-file` or `--post-json` are always all checked, and come before the listings. A listing skips posts already handled in the same run without counting them
 
-### Downloader Options
+### Filtering
 
-The following options apply only to the `download` command. This command downloads the files and resources linked to in the submission, or a text submission itself, to the disk in the specified directory.
-
-- `--make-hard-links`
-    - This flag will create hard links to an existing file when a duplicate is downloaded in the current run
-    - This will make the file appear in multiple directories while only taking the space of a single instance
-- `--max-wait-time`
-    - This option specifies the maximum wait time for downloading a resource
-    - The default is 120 seconds
-    - See [Rate Limiting](#rate-limiting) for details
-- `--no-dupes`
-    - This flag will not redownload files if they were already downloaded in the current run
-    - This is calculated by MD5 hash
-- `--search-existing`
-    - This will make the BDFR compile the hashes for every file in `directory`
-    - The hashes are used to remove duplicates if `--no-dupes` is supplied or make hard links if `--make-hard-links` is supplied
-- `--keep-hashes`
-    - This will save the hashes in a file `hash_list.json` in `directory` and load hashes from it if found
-    - The parameter `--search-existing` will only scan files not yet in the loaded list
-    - Do not run multiple instances of BDFR in `directory` when using this option
-- `--save-hashes-interval`
-    - Sets the interval after how many added hashes the files are written to disk
-    - Specify a value between 10 and 1000
-- `--file-scheme`
-    - Sets the scheme for files
-    - Default is `{REDDITOR}_{TITLE}_{POSTID}`
-    - See [Folder and File Name Schemes](#folder-and-file-name-schemes) for more details
-- `--folder-scheme`
-    - Sets the scheme for folders
-    - Default is `{SUBREDDIT}`
-    - See [Folder and File Name Schemes](#folder-and-file-name-schemes) for more details
-- `--exclude-id`
-    - This will skip the download of any submission with the ID provided
-    - Can be specified multiple times
-- `--exclude-id-file`
-    - This will skip the download of any submission with any of the IDs in the files provided
-    - Can be specified multiple times
-    - Format is one ID per line
-- `--skip-domain`
-    - This adds domains to the download filter i.e. submissions coming from these domains will not be downloaded
-    - Can be specified multiple times
-    - Domains must be supplied in the form `example.com` or `img.example.com`
+- `--exclude-id`, `--exclude-id-file`
+    - Posts to skip, by ID or from files of IDs (one per line); can be given more than once
+- `--ignore-user`
+    - Skip posts by this user; can be given more than once. `DELETED` skips posts by deleted accounts
 - `--skip`
-    - This adds file types to the download filter i.e. submissions with one of the supplied file extensions will not be downloaded
-    - Can be specified multiple times
+    - Skip media with this file extension, e.g. `--skip mp4`; can be given more than once
+- `--skip-domain`
+    - Skip media from this domain, e.g. `example.com` or `img.example.com`; can be given more than once
 - `--skip-subreddit`
-    - This skips all submissions from the specified subreddit
-    - Can be specified multiple times
-    - Also accepts CSV subreddit names
-- `--min-score`
-    - This skips all submissions which have fewer than specified upvotes
-- `--max-score`
-    - This skips all submissions which have more than specified upvotes
-- `--min-score-ratio`
-    - This skips all submissions which have lower than specified upvote ratio
-- `--max-score-ratio`
-    - This skips all submissions which have higher than specified upvote ratio
+    - Skip posts from this subreddit; can be given more than once or as a comma-separated list
+- `--min-score`, `--max-score`
+    - Skip posts with fewer or more upvotes than this. Posts whose score isn't known (some exported posts) aren't filtered
+- `--min-score-ratio`, `--max-score-ratio`
+    - Skip posts with a lower or higher upvote ratio than this. Exported posts are looked up in Arctic Shift to get their ratio
+- `--disable-module`
+    - Don't use this downloader module; can be given more than once. See [Disabling Modules](#disabling-modules)
+
+### Duplicates and the hash store
+
+- `--no-dupes`
+    - Don't save media whose content (MD5 hash) was already downloaded, in this run or, with `--search-existing`, `--keep-hashes` or `--keep-hashes-db`, before
+- `--make-hard-links`
+    - Instead of skipping such duplicates, hard link the new file to the existing one so it takes no extra space. If the existing file has gone, a copy is written
+- `--search-existing`
+    - Hash every file already in `directory` before downloading, so duplicates of them are recognised
+    - With `--keep-hashes` or `--keep-hashes-db`, only files not already in the store are hashed
+- `--keep-hashes`
+    - Keep the hashes between runs in three files in `directory`: `hash_list.json`, `hash_file_list.json` and `hash_url_list.json`. They are loaded at the start and saved at the end, keeping the previous version as `.bak`
+    - The store also records each downloaded media URL, so later runs skip those URLs without downloading them. URLs of files that are already in place under their expected name are recorded too, from the files' stored hashes
+    - If files change outside BDFR, delete the three files to start again with a full scan
+    - Don't run two instances against the same `directory` with this option
+- `--keep-hashes-db`
+    - Keep the same data in a SQLite database, `hashes.sqlite` in `directory`, which is written as it goes
+    - Given together with `--keep-hashes` once, the JSON files are converted into the database; after that use `--keep-hashes-db` alone
+- `--save-hashes-interval`
+    - With `--keep-hashes`, also save the files after this many new entries (10 to 1000), in case a run is interrupted
+
+### Downloading
+
+- `--max-wait-time`
+    - The longest to wait between retries of a rate-limited download, in seconds (default 120); see [Rate Limiting](#rate-limiting)
+- `--fail-fast`
+    - Wait only 5 seconds and retry once after a download error, instead of waiting 60 seconds and more. Connection errors such as `[Errno 11001]` and `[WinError 10061]` fail at once
 - `--imgur-originals`
-    - This downloads Imgur originals and no mp4 conversions
+    - Download Imgur originals (e.g. GIFs) rather than Imgur's MP4 conversions
+- `--imgur-fix404`
+    - When Imgur's API returns 404 for a `.gif` or `.gifv` link, try downloading the GIF or MP4 directly
 
-### Archiver Options
+### Naming and output
 
-The following options are for the `archive` command specifically.
+- `--file-scheme`
+    - The file name scheme, default `{REDDITOR}_{TITLE}_{POSTID}`; see [Folder and File Name Schemes](#folder-and-file-name-schemes)
+- `--rename-existing`
+    - When a post's media is found to be downloaded already (by its stored URL or its hash), rename the existing file to the name the current `--file-scheme` gives it, instead of leaving the old name
+    - Only files whose name contains the post's ID are renamed; an identical file belonging to another post keeps its name
+    - The hash store is updated with the new names. See [Changing the file scheme](#changing-the-file-scheme)
+- `--folder-scheme`
+    - The folder scheme, default `{SUBREDDIT}`; `''` puts everything directly in `directory`
+- `--time-format`
+    - The format of `{DATE}` in names; see [Time Formatting Customisation](#time-formatting-customisation)
+- `--filename-restriction-scheme`
+    - `windows` or `linux`: which file system's naming rules to follow, instead of detecting them; see [Filesystem Restrictions](#filesystem-restrictions)
+- `--filename-character-set`
+    - Which characters file names may contain under Windows rules: `ascii` (default), `unicode`, or `unicode_no_emojis`
 
-- `--all-comments`
-    - When combined with the `--user` option, this will download all the user's comments
-- `-f, --format`
-    - This specifies the format of the data file saved to disk
-    - The following formats are available:
-        - `json` (default)
-        - `xml`
-        - `yaml`
-- `--comment-context`
-    - This option will, instead of downloading an individual comment, download the submission that comment is a part of
-    - May result in a longer run time as it retrieves much more data
-- `--ignore-score`
-    - This option will ignore the values "score" and "upvote-ratio" for hashing, resulting in less updates of the submission data files
-    - Scores on comments, new comments and so on are still counted as update and the new data is written to disk
-- `--no-comments`
-    - Leaves out all the comments of a submission
+### General
 
-### Cloner Options
+- `--config`
+    - The configuration file to use; see [Configuration](#configuration)
+- `--opts`
+    - A YAML file of options; see [Usage](#usage)
+- `--log`
+    - Where to write the log file; needed when running several instances at once, see [Multiple Instances](#multiple-instances)
+- `-v, --verbose`
+    - Log more detail; can be given twice
 
-The `clone` command can take all the options listed above for both the `archive` and `download` commands since it performs the functions of both.
+## Deprecated: Reddit API features
 
-## Common Command Tricks
+These only work through Reddit's API, which no longer grants access to personal scripts, so they are deprecated. They still exist and log a deprecation warning, and will work if your Reddit app still has API access.
 
-A common use case is for subreddits/users to be loaded from a file. The BDFR supports this via YAML file options (`--opts my_opts.yaml`).
-
-Alternatively, you can use the command-line [xargs](https://en.wikipedia.org/wiki/Xargs) function.
-For a list of users `users.txt` (one user per line), type:
-
-```bash
-cat users.txt | xargs -L 1 echo --user | xargs -L 50 bdfr download <ARGS>
-```
-
-The part `-L 50` is to make sure that the character limit for a single line isn't exceeded, but may not be necessary. This can also be used to load subreddits from a file, simply exchange `--user` with `--subreddit` and so on.
-
-## Authentication and Security
-
-The BDFR uses OAuth2 authentication to connect to Reddit if authentication is required. This means that it is a secure, token-based system for making requests. This also means that the BDFR only has access to specific parts of the account authenticated, by default only saved posts, upvoted posts, and the identity of the authenticated account. Note that authentication is not required unless accessing private things like upvoted posts, saved posts, and private multireddits.
-
-To authenticate, the BDFR will first look for a token in the configuration file that signals that there's been a previous authentication. If this is not there, then the BDFR will attempt to register itself with your account. This is normal, and if you run the program, it will pause and show a Reddit URL. Click on this URL and it will take you to Reddit, where the permissions being requested will be shown. Read this and **confirm that there are no more permissions than needed to run the program**. You should not grant unneeded permissions; by default, the BDFR only requests permission to read your saved or upvoted submissions and identify as you.
-
-If the permissions look safe, confirm it, and the BDFR will save a token that will allow it to authenticate with Reddit from then on.
-
-## Changing Permissions
-
-Most users will not need to do anything extra to use any of the current features. However, if additional features such as scraping messages, PMs, etc are added in the future, these will require additional scopes. Additionally, advanced users may wish to use the BDFR with their own API key and secret. There is normally no need to do this, but it *is* allowed by the BDFR.
-
-The configuration file for the BDFR contains the API secret and key, as well as the scopes that the BDFR will request when registering itself to a Reddit account via OAuth2. These can all be changed if the user wishes, however do not do so if you don't know what you are doing. The defaults are specifically chosen to have a very low security risk if your token were to be compromised, however unlikely that actually is. Never grant more permissions than you absolutely need.
-
-For more details on the configuration file and the values therein, see [Configuration Files](#configuration).
+- `--source reddit` and running `archive` or `clone` (which always use Reddit's API, since only Reddit has comments)
+- `--authenticate`: logs in to Reddit with OAuth2. On first use BDFR shows a Reddit URL to approve, then saves the token as `user_token` in the configuration file; delete that line to log in again. It needs `client_id`, `client_secret` and `scopes` in the configuration file
+- `--saved`, `--upvoted`: a user's saved or upvoted posts; need `--authenticate` and `--user me`
+- `--subscribed`: the subreddits the logged in user subscribes to
+- `-m, --multireddit`: a multireddit of the single `--user`
+- `--search`: search subreddits or multireddits for a term
+- `-S, --sort`: `hot` (default), `new`, `top`, `controversial`, `rising` or `relevance` (with `--search`). Arctic Shift listings are always newest first
+- `archive`: saves post data and comments as `json` (default), `xml` or `yaml` (`-f, --format`), with `--all-comments` (a user's comments, with `--user`), `--comment-context` (the whole post a comment belongs to), `--no-comments` and `--ignore-score` (don't count score changes as updates to saved data)
+- `clone`: `archive` and `download` in one run, taking the options of both
+- [scripts/unsaveposts.py](scripts/unsaveposts.py): unsaves posts listed in a log file from your account
 
 ## Folder and File Name Schemes
 
-The naming and folder schemes for the BDFR are both completely customisable. A number of different fields can be given which will be replaced with properties from a submission when downloading it. The scheme format takes the form of `{KEY}`, where `KEY` is a string from the below list.
+File and folder names are built from schemes in which these keys, in curly brackets, are replaced with the post's details:
 
 - `DATE`
 - `FLAIR`
@@ -441,133 +233,136 @@ The naming and folder schemes for the BDFR are both completely customisable. A n
 - `TITLE`
 - `UPVOTES`
 
-Each of these can be enclosed in curly bracket, `{}`, and included in the name. For example, to just title every downloaded post with the unique submission ID, you can use `{POSTID}`. Static strings can also be included, such as `download_{POSTID}` which will not change from submission to submission. For example, the previous string will result in the following submission file names:
+For example `download_{POSTID}` gives `download_aaaaaa.png`, `download_bbbbbb.png` and so on. Gallery images get `_1`, `_2`, ... added.
 
-- `download_aaaaaa.png`
-- `download_bbbbbb.png`
+The file scheme must contain at least one key, and should contain `{POSTID}`: it is the only key guaranteed to be unique, and BDFR skips a download when a file with its name already exists. The folder scheme can be empty or a fixed string, which puts every file in the same folder.
 
-At least one key *must* be included in the file scheme, otherwise an error will be thrown. The folder scheme however, can be null or a simple static string. In the former case, all files will be placed in the folder specified with the `directory` argument. If the folder scheme is a static string, then all submissions will be placed in a folder of that name. In both cases, there will be no separation between all submissions.
+### Changing the file scheme
 
-It is highly recommended that the file name scheme contain the parameter `{POSTID}` as this is **the only parameter guaranteed to be unique**. No combination of other keys will necessarily be unique and may result in posts being skipped as the BDFR will see files by the same name and skip the download, assuming that they are already downloaded.
+When the folder already separates users (e.g. one folder per user under `bdfr serve D:\red`), the user name in every file name is redundant. BDFR sets each file's modified time to the post's creation time, so the date doesn't need to be in the name either. A short scheme that keeps the ID safe from title shortening is:
+
+```bash
+--file-scheme "{POSTID}_{TITLE}"
+```
+
+To move existing files to a new scheme offline, use `bdfr rename`. It reads the post ID, title and user name back from the old names (and `{DATE}` from modified times), renames the files, and updates the hash store (`hashes.sqlite` and the `hash_*.json` files). It makes no network requests.
+
+```bash
+bdfr rename D:\red\someone --file-scheme "{POSTID}_{TITLE}" --dry-run   # show what would change
+bdfr rename D:\red\someone --file-scheme "{POSTID}_{TITLE}"
+```
+
+- `--from-scheme` is the scheme the old names were made with, default `{REDDITOR}_{TITLE}_{POSTID}`
+- Files whose names don't match it, or whose new name is already taken, are left alone and listed
+- `--no-subfolders` only renames files directly in the folder
+- `--folder-is-user` only renames files starting with the folder's name, for folders named after their user. Without it, a user name containing `_` in a folder not named after that user can't be told apart from the title, and part of it may end up in the new name
+- Before renaming, the hash store is copied to `<name>.before-rename-<time>`, and a list of new and old names is saved as `bdfr-rename-<time>.json` in the folder
+- Modified times are kept, and gallery images keep their `_1`, `_2`, ... numbering
+- `--build-hash-db` also creates `hashes.sqlite` if the folder has none and adds the content hash of every file not already in it, so `--keep-hashes-db` runs recognise them by content. It can be used without renaming by giving the folder's current scheme as `--file-scheme`. Folders that keep their hashes in `hash_*.json` files are left alone; convert those by running a download once with both `--keep-hashes` and `--keep-hashes-db`
+- Media URLs can't be recovered offline, so a built hash DB starts without them. They are filled in as posts come up in later downloads: when a post's file is already in place, its URL is stored without downloading anything
+
+Afterwards, run downloads with the same `--file-scheme` so new files match. Alternatively, `--rename-existing` on `download` or `serve` renames files as their posts come up again, using the stored URLs and hashes.
 
 ## Configuration
 
-The configuration files are, by default, stored in the configuration directory for the user. This differs depending on the OS that the BDFR is being run on. For Windows, this will be:
+Configuration and log files live in the user's configuration directory:
 
-- `C:\Users\<User>\AppData\Local\BDFR\bdfr`
+- Windows: `C:\Users\<User>\AppData\Local\BDFR\bdfr` (with the Microsoft Store Python, under `C:\Users\<User>\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.x_<id>\LocalCache\Local\BDFR\bdfr`)
+- macOS: `~/Library/Application Support/bdfr`
+- Linux: `~/.config/bdfr/`
 
-If Python has been installed through the Windows Store, the folder will appear in a different place. Note that the hash included in the file path may change from installation to installation.
+BDFR uses the first of these that exists: `--config`, `./config.cfg`, `./default_config.cfg`, then `config.cfg` and `default_config.cfg` in the configuration directory. If none exists, the default configuration is copied to `default_config.cfg` there. Each run's log is written there as `log_output.txt`, keeping `backup_log_count` (default 3) previous logs.
 
-- `C:\Users\<User>\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.9_qbz5n2kfra8p0\LocalCache\Local\BDFR\bdfr`
+### Reading the logs
 
-On Mac OSX, this will be:
+The console shows one line per post, and the log file (`log_output.txt`, or `serve_log.txt` for `bdfr serve` jobs, one job per file) also has the debug lines for each file. With `-vv` both also get fine-grained tracing, such as every Arctic Shift request URL.
 
-- `~/Library/Application Support/bdfr`.
+```
+Looking up 59 of 200 posts in Arctic Shift:
+  gallery (40): 1x9xkq0, 1x9xhye, ...
+  self post (15): ...
+Arctic Shift request 1: posts/ids (59 IDs) -> 59 posts in 0.9s
+#1 1x9y297 in r/u_someone [Redgifs]: new - 1 file written
+#2 1x9xkq0 in r/pics [Gallery]: new - 4 files written
+#3 1wzgo2n in r/pics [Gallery]: skipped - 2 same as already downloaded 1wzgm15_Title_1.jpg, 1wzgm15_Title_2.jpg
+#4 1wzg1ab in r/pics [Direct]: already downloaded - 1 already in the folder
+Finished 200 posts: 2 new (5 files written), 1 already downloaded, 1 skipped
+Made 1 request to Arctic Shift (59 posts looked up: 40 gallery, 15 self post, 4 crosspost or link to another Reddit post)
+```
 
-Lastly, on a Linux system, this will be:
-
-- `~/.config/bdfr/`
-
-The logging output for each run of the BDFR will be saved to this directory in the file `log_output.txt`. If you need to submit a bug, it is this file that you will need to submit with the report.
+- **Lookups**: posts from the userscript or `--post-json` that link straight to media, v.redd.it videos and galleries sent with their image list are downloaded from the page's data. Other galleries, self posts, crossposts and posts with incomplete data need the full post from Arctic Shift. These are looked up 100 per request, and the log lists them by reason.
+- **Per post**: `new` means something was written, `already downloaded` means its files are already in the folder (or were renamed to the current scheme with `--rename-existing`), and `skipped` gives the reason (a filter, a failure, or the same content as an earlier download).
+- **`bdfr serve`**: the console shows when each job starts and finishes. Polling by the userscript isn't logged, only failed requests.
 
 ### Configuration File
 
-The `config.cfg` is the file that supplies the BDFR with the configuration to use. At the moment, the following keys **must** be included in the configuration file supplied.
+Required keys:
 
-- `client_id`
-- `client_secret`
-- `scopes`
+- `client_id`, `client_secret`: a Reddit app's credentials. Arctic Shift doesn't use them, but BDFR still needs them to build its post objects; the defaults work
+- `scopes`: the OAuth2 permissions requested by the deprecated `--authenticate`
 
-The following keys are optional, and defaults will be used if they cannot be found.
+Optional keys:
 
 - `backup_log_count`
 - `max_wait_time`
 - `time_format`
 - `disabled_modules`
-- `filename-restriction-scheme`
+- `filename_restriction_scheme`
 
-All of these should not be modified unless you know what you're doing, as the default values will enable the BDFR to function just fine. A configuration is included in the BDFR when it is installed, and this will be placed in the configuration directory as the default.
+### Time Formatting Customisation
 
-Most of these values have to do with OAuth2 configuration and authorisation. The key `backup_log_count` however has to do with the log rollover. The logs in the configuration directory can be verbose and for long runs of the BDFR, can grow quite large. To combat this, the BDFR will overwrite previous logs. This value determines how many previous run logs will be kept. The default is 3, which means that the BDFR will keep at most three past logs plus the current one. Any runs past this will overwrite the oldest log file, called "rolling over". If you want more records of past runs, increase this number.
+`time_format` (or `--time-format`, which takes priority) sets the format of `{DATE}` in names, using Python's [format codes](https://docs.python.org/3/library/datetime.html#strftime-strptime-behavior). The default is [ISO 8601](https://en.wikipedia.org/wiki/ISO_8601).
 
-#### Time Formatting Customisation
+### Disabling Modules
 
-The option `time_format` will specify the format of the timestamp that replaces `{DATE}` in filename and folder name schemes. By default, this is the [ISO 8601](https://en.wikipedia.org/wiki/ISO_8601) format which is highly recommended due to its standardised nature. If you don't **need** to change it, it is recommended that you do not. However, you can specify it to anything required with this option. The `--time-format` option supersedes any specification in the configuration file
-
-The format can be specified through the [format codes](https://docs.python.org/3/library/datetime.html#strftime-strptime-behavior) that are standard in the Python `datetime` library.
-
-#### Disabling Modules
-
-The individual modules of the BDFR, used to download submissions from websites, can be disabled. This is helpful especially in the case of the fallback downloaders, since the `--skip-domain` option cannot be effectively used in these cases. For example, the Youtube-DL downloader can retrieve data from hundreds of websites and domains; thus the only way to fully disable it is via the `--disable-module` option.
-
-Modules can be disabled through the command line interface for the BDFR or more permanently in the configuration file via the `disabled_modules` option. The list of downloaders that can be disabled are the following. Note that they are case-insensitive.
+Downloader modules can be disabled with `--disable-module` or the `disabled_modules` configuration key. This is the only way to stop the yt-dlp fallback, which handles hundreds of sites. The names, case-insensitive, are:
 
 - `Direct`
 - `DelayForReddit`
 - `Erome`
-- `Gallery` (Reddit Image Galleries)
+- `Gallery` (Reddit galleries)
 - `Gfycat`
 - `Imgur`
 - `PornHub`
 - `Redgifs`
-- `SelfPost` (Reddit Text Post)
+- `SelfPost` (Reddit text posts)
 - `Vidble`
-- `VReddit` (Reddit Video Post)
+- `VReddit` (Reddit videos)
 - `Youtube`
-- `YtdlpFallback` (Youtube DL Fallback)
+- `YtdlpFallback` (yt-dlp fallback)
 
 ### Rate Limiting
 
-The option `max_wait_time` has to do with retrying downloads. There are certain HTTP errors that mean that no amount of requests will return the wanted data, but some errors are from rate-limiting. This is when a single client is making so many requests that the remote website cuts the client off to preserve the function of the site. This is a common situation when downloading many resources from the same site. It is polite and best practice to obey the website's wishes in these cases.
-
-To this end, the BDFR will sleep for a time before retrying the download, giving the remote server time to "rest". This is done in 60 second increments. For example, if a rate-limiting-related error is given, the BDFR will sleep for 60 seconds before retrying. Then, if the same type of error occurs, it will sleep for another 120 seconds, then 180 seconds, and so on.
-
-The option `--max-wait-time` and the configuration option `max_wait_time` both specify the maximum time the BDFR will wait. If both are present, the command-line option takes precedence. For instance, the default is 120, so the BDFR will wait for 60 seconds, then 120 seconds, and then move one. **Note that this results in a total time of 180 seconds trying the same download**. If you wish to try to bypass the rate-limiting system on the remote site, increasing the maximum wait time may help. However, note that the actual wait times increase exponentially if the resource is not downloaded i.e. specifying a max value of 300 (5 minutes), can make the BDFR pause for 15 minutes on one submission, not 5, in the worst case.
+When a site rate-limits a download, BDFR waits 60 seconds and retries, then 120 seconds, and so on up to `--max-wait-time` (or `max_wait_time`, default 120). With the default that is 180 seconds of waiting for one download; larger values make waits grow quickly. `--fail-fast` shortens this to one retry after 5 seconds.
 
 ## Multiple Instances
 
-The BDFR can be run in multiple instances with multiple configurations, either concurrently or consecutively. The use of scripting files facilitates this the easiest, either Powershell on Windows operating systems or Bash elsewhere. This allows multiple scenarios to be run with data being scraped from different sources, as any two sets of scenarios might be mutually exclusive i.e. it is not possible to download any combination of data from a single run of the BDFR. To download from multiple users for example, multiple runs of the BDFR are required.
-
-Running these scenarios consecutively is done easily, like any single run. Configuration files that differ may be specified with the `--config` option to switch between tokens, for example. Otherwise, almost all configuration for data sources can be specified per-run through the command line.
-
-Running scenarios concurrently (at the same time) however, is more complicated. The BDFR will look to a single, static place to put the detailed log files, in a directory with the configuration file specified above. If there are multiple instances, or processes, of the BDFR running at the same time, they will all be trying to write to a single file. On Linux and other UNIX based operating systems, this will succeed, though there is a substantial risk that the logfile will be useless due to garbled and jumbled data. On Windows however, attempting this will raise an error that crashes the program as Windows forbids multiple processes from accessing the same file.
-
-The way to fix this is to use the `--log` option to manually specify where the logfile is to be stored. If the given location is unique to each instance of the BDFR, then it will run fine.
+Several runs can be scripted one after another, for example with different `--config` files or sources. Runs at the same time must each use their own `--log` file, as Windows doesn't allow two processes to write the same log, and must not share a `directory` when using `--keep-hashes`.
 
 ## Filesystem Restrictions
 
-Different filesystems have different restrictions for what files and directories can be named. Thesse are separated into two broad categories: Linux-based filesystems, which have very few restrictions; and Windows-based filesystems, which are much more restrictive in terms if forbidden characters and length of paths.
-
-During the normal course of operation, the BDFR detects what filesystem it is running on and formats any filenames and directories to conform to the rules that are expected of it. However, there are cases where this will fail. When running on a Linux-based machine, or another system where the home filesystem is permissive, and accessing a share or drive with a less permissive system, the BDFR will assume that the *home* filesystem's rules apply. For example, when downloading to a SAMBA share from Ubuntu, there will be errors as SAMBA is more restrictive than Ubuntu.
-
-The best option would be to always download to a filesystem that is as permission as possible, such as an NFS share or ext4 drive. However, when this is not possible, the BDFR allows for the restriction scheme to be manually specified at either the command-line or in the configuration file. At the command-line, this is done with `--filename-restriction-scheme windows`, or else an option by the same name in the configuration file.
+BDFR follows the naming rules of the system it runs on. When saving to a drive with stricter rules, such as a Windows (SMB) share from Linux, set `--filename-restriction-scheme windows` or `filename_restriction_scheme` in the configuration file.
 
 ## Manipulating Logfiles
 
-The logfiles that the BDFR outputs are consistent and quite detailed and in a format that is amenable to regex. To this end, a number of bash scripts have been [included here](./scripts). They show examples for how to extract successfully downloaded IDs, failed IDs, and more besides.
-
-## Unsaving posts
-
-Back in v1 there was an option to unsave posts from your account when downloading, but it was removed from the core BDFR on v2 as it is considered a read-only tool. However, for those missing this functionality, a script was created that uses the log files to achieve this. There is info on how to use this on the README.md file on the scripts subdirectory.
+The [scripts](scripts) folder has Bash and PowerShell scripts that read BDFR logs, e.g. to list the IDs of successful or failed downloads.
 
 ## List of currently supported sources
 
-- Direct links (links leading to a file)
+- Direct links to files
 - Delay for Reddit
 - Erome
-- Gfycat
-- Gif Delivery Network
+- Gfycat (old links are fetched from Redgifs, where Gfycat's surviving clips moved)
 - Imgur
-- Reddit Galleries
-- Reddit Text Posts
-- Reddit Videos
+- PornHub
+- Reddit galleries
+- Reddit text posts
+- Reddit videos
 - Redgifs
 - Vidble
 - YouTube
-    - Any source supported by [YT-DLP](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) should be compatable
+    - Any site supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)
 
 ## Contributing
 
-If you wish to contribute, see [Contributing](docs/CONTRIBUTING.md) for more information.
-
-When reporting any issues or interacting with the developers, please follow the [Code of Conduct](docs/CODE_OF_CONDUCT.md).
+See [AGENTS.md](AGENTS.md) for how the code is organised, how to run the tests, and the fork's conventions. Upstream's [contributing guide](docs/CONTRIBUTING.md) and [Code of Conduct](docs/CODE_OF_CONDUCT.md) still apply.

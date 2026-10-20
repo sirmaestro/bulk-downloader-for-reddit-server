@@ -25,7 +25,7 @@ class Youtube(BaseDownloader):
 
     def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> list[Resource]:
         ytdl_options = {
-            "format": "best",
+            "format": "bestvideo*+bestaudio/best",
             "playlistend": 1,
             "nooverwrites": True,
         }
@@ -34,7 +34,8 @@ class Youtube(BaseDownloader):
         res = Resource(self.post, self.post.url, download_function, extension)
         return [res]
 
-    def _download_video(self, ytdl_options: dict) -> Callable:
+    def _download_video(self, ytdl_options: dict, url: Optional[str] = None) -> Callable:
+        url = url or self.post.url
         yt_logger = logging.getLogger("youtube-dl")
         yt_logger.setLevel(logging.CRITICAL)
         ytdl_options["quiet"] = True
@@ -46,7 +47,7 @@ class Youtube(BaseDownloader):
                 ytdl_options["outtmpl"] = str(download_path) + "/" + "test.%(ext)s"
                 try:
                     with yt_dlp.YoutubeDL(ytdl_options) as ydl:
-                        ydl.download([self.post.url])
+                        ydl.download([url])
                 except yt_dlp.DownloadError as e:
                     raise SiteDownloaderError(f"Youtube download failed: {e}")
 
@@ -54,7 +55,7 @@ class Youtube(BaseDownloader):
                 if downloaded_files:
                     downloaded_file = downloaded_files[0]
                 else:
-                    raise NotADownloadableLinkError(f"No media exists in the URL {self.post.url}")
+                    raise NotADownloadableLinkError(f"No media exists in the URL {url}")
                 with downloaded_file.open("rb") as file:
                     content = file.read()
                 return content

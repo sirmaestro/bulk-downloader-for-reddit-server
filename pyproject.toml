@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bdfr"
-description = "Downloads and archives content from reddit"
+description = "Downloads content posted to Reddit, reading posts from the Arctic Shift archive (saved-hashes fork of BDFR)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
@@ -12,7 +12,6 @@ keywords = ["reddit", "download", "archive",]
 authors = [{name = "Ali Parlakci", email = "parlakciali@gmail.com"}]
 maintainers = [{name = "Serene Arc", email = "serenical@gmail.com"}]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Natural Language :: English",
@@ -21,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
     "appdirs>=1.4.4",
@@ -31,7 +31,7 @@ dependencies = [
     "pyyaml>=5.4.1",
     "requests>=2.25.1",
     "yt-dlp>=2022.11.11",
-	"emoji>=2.2.0"
+    "emoji>=2.2.0",
 ]
 dynamic = ["version"]
 
@@ -51,9 +51,8 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://aliparlakci.github.io/bulk-downloader-for-reddit"
-"Source" = "https://github.com/aliparlakci/bulk-downloader-for-reddit"
-"Bug Reports" = "https://github.com/aliparlakci/bulk-downloader-for-reddit/issues"
+"Source" = "https://github.com/sirmaestro/bulk-downloader-for-reddit_with-saved-hashes"
+"Upstream" = "https://github.com/aliparlakci/bulk-downloader-for-reddit"
 
 [project.scripts]
 bdfr = "bdfr.__main__:cli"

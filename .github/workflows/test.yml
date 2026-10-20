@@ -2,58 +2,38 @@ name: Python Test
 
 on:
   push:
-    branches: [ master, development ]
+    branches: [ master ]
     paths-ignore:
       - "**.md"
-      - ".markdown_style.rb"
-      - ".mdlrc"
   pull_request:
-    branches: [ master, development ]
+    branches: [ master ]
     paths-ignore:
       - "**.md"
-      - ".markdown_style.rb"
-      - ".mdlrc"
 
 jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: [3.9]
-        ext: [.sh]
-        include:
-        - os: windows-latest
-          python-version: 3.9
-          ext: .ps1
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.9", "3.12"]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip Flake8-pyproject pytest pytest-cov
+        python -m pip install --upgrade pip flake8 pytest
         pip install .
-
-    - name: Make configuration for tests
-      env:
-        REDDIT_TOKEN: ${{ secrets.REDDIT_TEST_TOKEN }}
-      run: |
-        ./devscripts/configure${{ matrix.ext }}
 
     - name: Lint with flake8
       run: |
-        flake8 . --select=E9,F63,F7,F82
+        flake8 bdfr tests --select=E9,F63,F7,F82
 
+    # Reddit's API is closed to this fork and other online tests depend on third-party sites, so only offline tests run
     - name: Test with pytest
       run: |
-        pytest -m 'not slow' --verbose --cov=./bdfr/ --cov-report term:skip-covered --cov-report html
-
-    - name: Upload coverage report
-      uses: actions/upload-artifact@v3
-      with:
-        name: coverage_report
-        path: htmlcov/
+        pytest -m "not online and not reddit and not authenticated and not slow" --ignore=tests/integration_tests

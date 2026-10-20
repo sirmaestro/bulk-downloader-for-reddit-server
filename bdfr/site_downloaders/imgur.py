@@ -4,7 +4,7 @@
 import json
 import logging
 import re
-import urllib
+import urllib.request
 from typing import Optional
 
 from praw.models import Submission
@@ -31,13 +31,14 @@ class Imgur(BaseDownloader):
                 self.raw_data = self._get_data(self.post.url)
             except Exception as e:
                 if (self.args.imgur_fix404 and
-                        str(e).startswith("Server responded with 404 to") and
+                        "responded with 404" in str(e) and
                         re.search(r".*(.gif|.gifv)$", self.post.url)):
                     logger.debug(f"{e}")
                     out = []
                     if re.search(r".*(.gifv)$", self.post.url):
-                        bytes = urllib.request.urlopen(self.post.url[:-1]).read(3)
-                        if not self.args.imgur_originals or bytes == b"\xff\xd8\xff":
+                        with urllib.request.urlopen(self.post.url[:-1], timeout=30) as response:
+                            magic = response.read(3)
+                        if not self.args.imgur_originals or magic ==b"\xff\xd8\xff":
                             logger.debug(f"using {self.post.url[:-4]}mp4")
                             out.append(Resource(self.post, self.post.url[:-4] + "mp4", Resource.retry_download(self.post.url[:-4] + "mp4")))
                         else:

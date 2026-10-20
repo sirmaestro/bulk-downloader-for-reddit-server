@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from unittest.mock import MagicMock
+
 import praw
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.exceptions import SiteDownloaderError
 from bdfr.site_downloaders.gallery import Gallery
 
@@ -92,13 +95,15 @@ def test_gallery_get_links(test_ids: list[dict], expected: set[str]):
 )
 def test_gallery_download(test_submission_id: str, expected_hashes: set[str], reddit_instance: praw.Reddit):
     test_submission = reddit_instance.submission(id=test_submission_id)
-    gallery = Gallery(test_submission)
+    gallery = Gallery(test_submission, Configuration())
     results = gallery.find_resources()
     [res.download() for res in results]
     hashes = [res.hash.hexdigest() for res in results]
     assert set(hashes) == expected_hashes
 
 
+@pytest.mark.online
+@pytest.mark.reddit
 @pytest.mark.parametrize(
     "test_id",
     (
@@ -108,6 +113,18 @@ def test_gallery_download(test_submission_id: str, expected_hashes: set[str], re
 )
 def test_gallery_download_raises_right_error(test_id: str, reddit_instance: praw.Reddit):
     test_submission = reddit_instance.submission(id=test_id)
-    gallery = Gallery(test_submission)
+    gallery = Gallery(test_submission, Configuration())
     with pytest.raises(SiteDownloaderError):
         gallery.find_resources()
+
+
+@pytest.mark.parametrize(("removed", "message"), (("reddit", "removed by Reddit"), ("deleted", "deleted by its author"),
+                                                  (None, "No images found")))
+def test_gallery_without_data_says_why(removed, message):
+    post = MagicMock(spec=["id", "gallery_data", "crosspost_parent_list", "removed_by_category"])
+    post.id = "abc1234"
+    post.gallery_data = None
+    post.crosspost_parent_list = None
+    post.removed_by_category = removed
+    with pytest.raises(SiteDownloaderError, match=message):
+        Gallery(post, Configuration()).find_resources()

@@ -3,9 +3,9 @@
 
 import logging
 import sys
+from pathlib import Path
 
 import click
-import requests
 
 from bdfr import __version__
 from bdfr.archiver import Archiver
@@ -13,12 +13,16 @@ from bdfr.cloner import RedditCloner
 from bdfr.completion import Completion
 from bdfr.configuration import Configuration
 from bdfr.downloader import RedditDownloader
+from bdfr.renamer import Renamer, rename_directory
+from bdfr.server import DEFAULT_PORT, run_server
 
 logger = logging.getLogger()
 
+_REDDIT_API_ONLY = "Deprecated: needs Reddit's API, which no longer grants access to personal scripts."
+
 _common_options = [
     click.argument("directory", type=str),
-    click.option("--authenticate", is_flag=True, default=None),
+    click.option("--authenticate", is_flag=True, default=None, help=_REDDIT_API_ONLY),
     click.option("--config", type=str, default=None),
     click.option("--disable-module", multiple=True, default=None, type=str),
     click.option("--exclude-id", default=None, multiple=True),
@@ -31,18 +35,22 @@ _common_options = [
     click.option("--include-id-file", multiple=True, default=None),
     click.option("--log", type=str, default=None),
     click.option("--opts", type=str, default=None),
-    click.option("--saved", is_flag=True, default=None),
-    click.option("--search", default=None, type=str),
+    click.option("--saved", is_flag=True, default=None, help=_REDDIT_API_ONLY),
+    click.option("--search", default=None, type=str, help=_REDDIT_API_ONLY),
     click.option("--submitted", is_flag=True, default=None),
-    click.option("--subscribed", is_flag=True, default=None),
+    click.option("--subscribed", is_flag=True, default=None, help=_REDDIT_API_ONLY),
     click.option("--time-format", type=str, default=None),
-    click.option("--upvoted", is_flag=True, default=None),
+    click.option("--upvoted", is_flag=True, default=None, help=_REDDIT_API_ONLY),
     click.option("--fail-fast", is_flag=True, default=None),
     click.option("-L", "--limit", default=None, type=int),
     click.option("-l", "--link", multiple=True, default=None, type=str),
-    click.option("-m", "--multireddit", multiple=True, default=None, type=str),
+    click.option("-m", "--multireddit", multiple=True, default=None, type=str, help=_REDDIT_API_ONLY),
     click.option(
-        "-S", "--sort", type=click.Choice(("hot", "top", "new", "controversial", "rising", "relevance")), default=None
+        "-S",
+        "--sort",
+        type=click.Choice(("hot", "top", "new", "controversial", "rising", "relevance")),
+        default=None,
+        help=f"{_REDDIT_API_ONLY} Arctic Shift listings are always newest first.",
     ),
     click.option("-s", "--subreddit", multiple=True, default=None, type=str),
     click.option("-t", "--time", type=click.Choice(("all", "hour", "day", "week", "month", "year")), default=None),
@@ -58,6 +66,32 @@ _downloader_options = [
     click.option("--keep-hashes", is_flag=True, default=None),
     click.option("--keep-hashes-db", is_flag=True, default=None),
     click.option("--save-hashes-interval", type=click.IntRange(10, 1000), default=None),
+    click.option("--stop-at-existing", type=click.IntRange(1), default=None),
+    click.option(
+        "--parallel",
+        type=click.IntRange(1, 16),
+        default=None,
+        help="Download this many posts at once (default 1). Duplicate checks and file writes stay one at a time.",
+    ),
+    click.option(
+        "--media-only",
+        is_flag=True,
+        default=None,
+        help="Skip self posts and crossposts.",
+    ),
+    click.option(
+        "--rename-existing",
+        is_flag=True,
+        default=None,
+        help="Rename already downloaded files of a post to the current --file-scheme when they are found again.",
+    ),
+    click.option(
+        "--source",
+        type=click.Choice(("arctic-shift", "reddit")),
+        default=None,
+        help="Where posts are read from (default: arctic-shift). 'reddit' is deprecated.",
+    ),
+    click.option("--post-json", multiple=True, default=None, type=str),
     click.option("--skip", default=None, multiple=True),
     click.option("--skip-domain", default=None, multiple=True),
     click.option("--skip-subreddit", default=None, multiple=True),
@@ -80,7 +114,8 @@ _archiver_options = [
 
 def _add_options(opts: list):
     def wrap(func):
-        for opt in opts:
+        # Decorators apply bottom-up, so reverse to keep --help in the listed order
+        for opt in reversed(opts):
             func = opt(func)
         return func
 
@@ -90,9 +125,8 @@ def _add_options(opts: list):
 def _check_version(context, param, value):
     if not value or context.resilient_parsing:
         return
-    current = __version__
-    latest = requests.get("https://pypi.org/pypi/bdfr/json").json()["info"]["version"]
-    print(f"You are currently using v{current} the latest is v{latest}")
+    # This fork is not published, so PyPI's bdfr version says nothing about it
+    print(f"bdfr (saved-hashes fork) v{__version__}")
     context.exit()
 
 
@@ -104,7 +138,7 @@ def _check_version(context, param, value):
     is_eager=True,
     expose_value=False,
     callback=_check_version,
-    help="Check version and exit.",
+    help="Show version and exit.",
 )
 def cli():
     """BDFR is used to download and archive content from Reddit."""
@@ -132,13 +166,13 @@ def cli_download(context: click.Context, **_):
         logger.info("Program complete")
 
 
-@cli.command("archive")
+@cli.command("archive", deprecated=True)
 @_add_options(_common_options)
 @_add_options(_archiver_options)
 @click.help_option("-h", "--help")
 @click.pass_context
 def cli_archive(context: click.Context, **_):
-    """Used to archive post data from Reddit."""
+    """Used to archive post data from Reddit. Needs Reddit's API."""
     config = Configuration()
     config.process_click_arguments(context)
     silence_module_loggers()
@@ -153,14 +187,14 @@ def cli_archive(context: click.Context, **_):
         logger.info("Program complete")
 
 
-@cli.command("clone")
+@cli.command("clone", deprecated=True)
 @_add_options(_common_options)
 @_add_options(_archiver_options)
 @_add_options(_downloader_options)
 @click.help_option("-h", "--help")
 @click.pass_context
 def cli_clone(context: click.Context, **_):
-    """Combines archive and download commands."""
+    """Combines archive and download commands. Needs Reddit's API."""
     config = Configuration()
     config.process_click_arguments(context)
     silence_module_loggers()
@@ -173,6 +207,103 @@ def cli_clone(context: click.Context, **_):
         raise
     else:
         logger.info("Program complete")
+
+
+# What `bdfr serve` uses unless told otherwise: one folder per user (the folder the userscript names), files named by
+# post ID first, every file's hash kept in that folder's hashes.sqlite, and duplicates skipped
+SERVE_DEFAULTS = {
+    "no_dupes": True,
+    "search_existing": True,
+    "keep_hashes_db": True,
+    "folder_scheme": "",
+    "file_scheme": "{POSTID}_{TITLE}",
+    "parallel": 4,
+    "media_only": True,
+}
+
+
+@cli.command("serve")
+@_add_options(_common_options)
+@_add_options(_downloader_options)
+@click.option(
+    "--no-defaults",
+    is_flag=True,
+    default=False,
+    help="Don't apply serve's defaults ("
+    + " ".join(f"--{k.replace('_', '-')}" + ("" if v is True else f" {v}" if isinstance(v, int) else f" '{v}'") for k, v in SERVE_DEFAULTS.items())
+    + "); use the download command's.",
+)
+@click.option(
+    "--port",
+    type=click.IntRange(1024, 65535),
+    default=DEFAULT_PORT,
+    help=f"Port to listen on (default {DEFAULT_PORT}).",
+)
+@click.help_option("-h", "--help")
+@click.pass_context
+def cli_serve(context: click.Context, **_):
+    """Runs downloads requested by the Tampermonkey script, each into a folder under DIRECTORY.
+
+    Download options given here apply to every request. Unless --no-defaults is given, serve uses --no-dupes
+    --search-existing --keep-hashes-db --folder-scheme '' --file-scheme '{POSTID}_{TITLE}' --parallel 4
+    --media-only; options
+    given here or in --opts override them (in --opts, e.g. no_dupes: false)."""
+    port = context.params.pop("port")
+    no_defaults = context.params.pop("no_defaults")
+    config = Configuration()
+    if not no_defaults:
+        # Applied first, so --opts files and command line options still win
+        for key, value in SERVE_DEFAULTS.items():
+            setattr(config, key, value)
+    config.process_click_arguments(context)
+    silence_module_loggers()
+    logging.getLogger().addHandler(make_console_logging_handler(config.verbose))
+    run_server(config, port)
+
+
+@cli.command("rename")
+@click.argument("directory", type=str)
+@click.option("--file-scheme", required=True, help="The new file name scheme, e.g. '{POSTID}_{TITLE}'.")
+@click.option(
+    "--from-scheme",
+    default="{REDDITOR}_{TITLE}_{POSTID}",
+    show_default=True,
+    help="The scheme the existing names were made with.",
+)
+@click.option(
+    "--time-format", default="ISO", help="Format of {DATE} in the new names (dates come from modified times)."
+)
+@click.option("--filename-restriction-scheme", type=click.Choice(("linux", "windows")), default=None)
+@click.option("--filename-character-set", type=click.Choice(("ascii", "unicode", "unicode_no_emojis")), default=None)
+@click.option(
+    "--build-hash-db",
+    is_flag=True,
+    help="Create hashes.sqlite if missing and add the content hash of every file not in it.",
+)
+@click.option("--no-subfolders", is_flag=True, help="Only rename files directly in DIRECTORY.")
+@click.option(
+    "--folder-is-user",
+    is_flag=True,
+    help="The folder is named after the user, so only files starting with its name are renamed.",
+)
+@click.option("--dry-run", is_flag=True, help="Only show what would be renamed.")
+@click.option("-v", "--verbose", count=True)
+@click.help_option("-h", "--help")
+def cli_rename(directory: str, file_scheme: str, from_scheme: str, time_format: str, filename_restriction_scheme,
+               filename_character_set, build_hash_db: bool, no_subfolders: bool, folder_is_user: bool,
+               dry_run: bool, verbose: int):
+    """Renames downloaded files in DIRECTORY to a new file scheme, offline.
+
+    Uses only the existing file names, modified times and hash store; makes no network requests."""
+    logging.getLogger().addHandler(make_console_logging_handler(verbose))
+    renamer = Renamer(
+        from_scheme, file_scheme, time_format, filename_restriction_scheme, filename_character_set, folder_is_user
+    )
+    result = rename_directory(Path(directory), renamer, dry_run, build_hash_db, recursive=not no_subfolders)
+    summary = f"{result['planned']} to rename, {result['renamed']} renamed, {result['skipped']} skipped"
+    if build_hash_db:
+        summary += f", {result['hashed']} {'to hash' if dry_run else 'hashed'}"
+    logger.info(summary)
 
 
 @cli.command("completion")

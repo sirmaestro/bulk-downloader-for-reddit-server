@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import hashlib
-import io
 import json
 import logging
 import re
@@ -37,7 +36,12 @@ def _calc_string_hash(content: str):
 
 
 class Archiver(RedditConnector):
+    # Archives include comments, which only Reddit's API provides
+    default_source = "reddit"
+
     def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = ()):
+        if args.source not in (None, "reddit"):
+            raise ArchiverError("archive and clone need comments from Reddit's API, so only work with --source reddit")
         super(Archiver, self).__init__(args, logging_handlers)
 
     def download(self):

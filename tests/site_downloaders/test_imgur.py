@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.resource import Resource
 from bdfr.site_downloaders.imgur import Imgur
 
@@ -55,7 +56,7 @@ from bdfr.site_downloaders.imgur import Imgur
 def test_find_resources(test_url: str, expected_hashes: list[str]):
     mock_download = Mock()
     mock_download.url = test_url
-    downloader = Imgur(mock_download)
+    downloader = Imgur(mock_download, Configuration())
     results = downloader.find_resources()
     assert all([isinstance(res, Resource) for res in results])
     [res.download() for res in results]

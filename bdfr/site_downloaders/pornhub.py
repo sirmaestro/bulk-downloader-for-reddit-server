@@ -21,7 +21,7 @@ class PornHub(Youtube):
 
     def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> list[Resource]:
         ytdl_options = {
-            "format": "best",
+            "format": "bestvideo*+bestaudio/best",
             "nooverwrites": True,
         }
         if video_attributes := super().get_video_attributes(self.post.url):

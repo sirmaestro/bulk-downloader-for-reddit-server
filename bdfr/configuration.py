@@ -41,6 +41,13 @@ class Configuration(Namespace):
         self.keep_hashes: bool = False
         self.keep_hashes_db: bool = False
         self.save_hashes_interval: int = 0
+        self.stop_at_existing: int = 0
+        self.parallel: int = 1
+        self.media_only: bool = False
+        self.rename_existing: bool = False
+        # None picks the command's default: arctic-shift for download, reddit for archive and clone
+        self.source: Optional[str] = None
+        self.post_json: list[str] = []
         self.skip: list[str] = []
         self.skip_domain: list[str] = []
         self.skip_subreddit: list[str] = []
@@ -88,7 +95,7 @@ class Configuration(Namespace):
             return
         with yaml_file_loc.open() as file:
             try:
-                opts = yaml.safe_load(file)
+                opts = yaml.safe_load(file) or {}
             except yaml.YAMLError as e:
                 logger.error(f"Could not parse YAML options file: {e}")
                 return

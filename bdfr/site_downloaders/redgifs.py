@@ -3,19 +3,25 @@
 
 import json
 import re
+import threading
 from typing import Optional
 
 import requests
 from praw.models import Submission
 
 from bdfr.configuration import Configuration
-from bdfr.exceptions import SiteDownloaderError
+from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
 from bdfr.resource import Resource
 from bdfr.site_authenticator import SiteAuthenticator
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 
 class Redgifs(BaseDownloader):
+    REQUEST_TIMEOUT = 10
+    # Temporary API tokens last about a day, so one is shared by every post (and download thread) in a run
+    _token: Optional[str] = None
+    _token_lock = threading.Lock()
+
     def __init__(self, post: Submission, args: Configuration):
         super().__init__(post, args)
 
@@ -36,21 +42,46 @@ class Redgifs(BaseDownloader):
         return redgif_id
 
     @staticmethod
-    def _get_link(url: str) -> set[str]:
-        redgif_id = Redgifs._get_id(url)
+    def _url_is_accessible(url: str, headers: dict, timeout: int) -> bool:
+        # Only the status is needed; the body (the whole video) is downloaded later by the Resource
+        try:
+            with requests.get(url, headers=headers, timeout=timeout, stream=True) as response:
+                return response.ok
+        except requests.exceptions.RequestException as e:
+            raise SiteDownloaderError(f"Could not access Redgifs URL {url}: {e}")
 
-        auth_token = json.loads(Redgifs.retrieve_url("https://api.redgifs.com/v2/auth/temporary").text)["token"]
-        if not auth_token:
-            raise SiteDownloaderError("Unable to retrieve Redgifs API token")
+    @classmethod
+    def _get_token(cls, renew: bool = False) -> str:
+        with cls._token_lock:
+            if renew or not cls._token:
+                token = json.loads(cls.retrieve_url("https://api.redgifs.com/v2/auth/temporary").text)["token"]
+                if not token:
+                    raise SiteDownloaderError("Unable to retrieve Redgifs API token")
+                cls._token = token
+            return cls._token
 
-        headers = {
+    @staticmethod
+    def _headers(token: str) -> dict:
+        return {
             "referer": "https://www.redgifs.com/",
             "origin": "https://www.redgifs.com",
             "content-type": "application/json",
-            "Authorization": f"Bearer {auth_token}",
+            "Authorization": f"Bearer {token}",
         }
 
-        content = Redgifs.retrieve_url(f"https://api.redgifs.com/v2/gifs/{redgif_id}", headers=headers)
+    @staticmethod
+    def _get_link(url: str) -> set[str]:
+        redgif_id = Redgifs._get_id(url)
+
+        headers = Redgifs._headers(Redgifs._get_token())
+        try:
+            content = Redgifs.retrieve_url(f"https://api.redgifs.com/v2/gifs/{redgif_id}", headers=headers)
+        except ResourceNotFound as e:
+            if "responded with 401" not in str(e) and "responded with 403" not in str(e):
+                raise
+            # The shared token expired; get a new one
+            headers = Redgifs._headers(Redgifs._get_token(renew=True))
+            content = Redgifs.retrieve_url(f"https://api.redgifs.com/v2/gifs/{redgif_id}", headers=headers)
 
         if content is None:
             raise SiteDownloaderError("Could not read the page source")
@@ -63,10 +94,19 @@ class Redgifs(BaseDownloader):
         out = set()
         try:
             if response_json["gif"]["type"] == 1:  # type 1 is a video
-                if requests.get(response_json["gif"]["urls"]["hd"], headers=headers).ok:
-                    out.add(response_json["gif"]["urls"]["hd"])
-                else:
-                    out.add(response_json["gif"]["urls"]["sd"])
+                hd_url = response_json["gif"]["urls"]["hd"]
+                sd_url = response_json["gif"]["urls"]["sd"]
+                try:
+                    if Redgifs._url_is_accessible(hd_url, headers, Redgifs.REQUEST_TIMEOUT):
+                        out.add(hd_url)
+                    elif Redgifs._url_is_accessible(sd_url, headers, Redgifs.REQUEST_TIMEOUT):
+                        out.add(sd_url)
+                    else:
+                        raise SiteDownloaderError(
+                            f"Neither HD nor SD Redgifs media URLs were reachable: {hd_url} / {sd_url}"
+                        )
+                except SiteDownloaderError as e:
+                    raise SiteDownloaderError(f"Failed to verify Redgifs media URL {hd_url}: {e}")
             elif response_json["gif"]["type"] == 2:  # type 2 is an image
                 if response_json["gif"]["gallery"]:
                     content = Redgifs.retrieve_url(

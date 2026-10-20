@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.exceptions import SiteDownloaderError
 from bdfr.resource import Resource
 from bdfr.site_downloaders.pornhub import PornHub
@@ -19,7 +20,7 @@ from bdfr.site_downloaders.pornhub import PornHub
 def test_hash_resources_good(test_url: str, expected_hash: str):
     test_submission = MagicMock()
     test_submission.url = test_url
-    downloader = PornHub(test_submission)
+    downloader = PornHub(test_submission, Configuration())
     resources = downloader.find_resources()
     assert len(resources) == 1
     assert isinstance(resources[0], Resource)
@@ -32,6 +33,6 @@ def test_hash_resources_good(test_url: str, expected_hash: str):
 def test_find_resources_good(test_url: str):
     test_submission = MagicMock()
     test_submission.url = test_url
-    downloader = PornHub(test_submission)
+    downloader = PornHub(test_submission, Configuration())
     with pytest.raises(SiteDownloaderError):
         downloader.find_resources()

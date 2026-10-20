@@ -18,6 +18,10 @@ class ArchiverError(BulkDownloaderException):
     pass
 
 
+class ArcticShiftError(BulkDownloaderException):
+    pass
+
+
 class SiteDownloaderError(BulkDownloaderException):
     pass
 

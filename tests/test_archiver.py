@@ -34,10 +34,10 @@ def test_write_submission_json(test_submission_id: str, tmp_path: Path, test_for
     "test_submission_ids",
     (
         ("1000000",),
-        ("https://reddit.com/comments/1000000/"),
+        ("https://reddit.com/comments/1000000/",),
     ),
 )
-def test_get_submissions_from_link(test_submission_ids: list[str])
+def test_get_submissions_from_link(test_submission_ids: list[str]):
     archiver_mock = MagicMock()
     archiver_mock.args.link = test_submission_ids
     results = Archiver.get_submissions_from_link(archiver_mock)

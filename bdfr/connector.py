@@ -21,6 +21,7 @@ from multiprocessing import Pool
 from pathlib import Path
 from sqlite3 import Error, OperationalError
 from time import sleep
+from typing import Optional
 
 import appdirs
 import praw
@@ -29,6 +30,7 @@ import praw.models
 import prawcore
 
 from bdfr import exceptions as errors
+from bdfr.arctic_shift import ArcticShift, read_post_json, submission_id_from_link
 from bdfr.configuration import Configuration
 from bdfr.download_filter import DownloadFilter
 from bdfr.file_name_formatter import FileNameFormatter
@@ -71,6 +73,7 @@ def _calc_hash(existing_file: Path):
 class RedditConnector(metaclass=ABCMeta):
 
     __HASH_DB_NAME = "hashes.sqlite"
+    default_source = "arctic-shift"
 
     def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = ()):
         self.args = args
@@ -86,7 +89,12 @@ class RedditConnector(metaclass=ABCMeta):
         self.reddit_lists = self.retrieve_reddit_lists()
 
         if self.args.search_existing:
-            (self.master_hash_list, self.master_file_list, self.master_url_list) = self.scan_existing_files(self.download_directory, self.args.keep_hashes)
+            (self.master_hash_list, self.master_file_list, self.master_url_list) = self.scan_existing_files(
+                self.download_directory, self.args.keep_hashes, self._hashed_files_in_db()
+            )
+            if self.args.keep_hashes_db:
+                # The DB is what duplicate checks read in DB mode, so the scan results go there
+                self._add_scanned_hashes_to_db(self.master_hash_list)
         elif self.args.keep_hashes:
             (self.master_hash_list, self.master_file_list, self.master_url_list) = self._load_hash_list(self.download_directory)
         if self.args.keep_hashes:
@@ -107,8 +115,26 @@ class RedditConnector(metaclass=ABCMeta):
         self.file_name_formatter = self.create_file_name_formatter()
         logger.log(9, "Create file name formatter")
 
+        self.arctic_shift = None
+        if self.args.source is None:
+            self.args.source = self.default_source
+        if self.args.source == "reddit":
+            logger.warning(
+                "Reading from Reddit's API (--source reddit, archive and clone) is deprecated: Reddit no longer grants "
+                "API access to personal scripts, so expect HTTP 403 errors. Use download with --source arctic-shift"
+            )
+        elif self.args.source == "arctic-shift":
+            if self.args.authenticate:
+                logger.warning("--authenticate is not used with --source arctic-shift")
+                self.args.authenticate = False
+        else:
+            raise errors.BulkDownloaderException(f"Unknown source '{self.args.source}'")
         self.create_reddit_instance()
+        if self.args.source == "arctic-shift":
+            # The Reddit instance is only used to build submission objects, it makes no requests
+            self.arctic_shift = ArcticShift(self.reddit_instance)
         self.args.user = list(filter(None, [self.resolve_user_name(user) for user in self.args.user]))
+        self.exported_posts = read_post_json(self.args.post_json) if self.args.post_json else []
 
         self.excluded_submission_ids = set.union(
             set(self.read_id_files(self.args.exclude_id_file)),
@@ -189,7 +215,7 @@ class RedditConnector(metaclass=ABCMeta):
                 dict_json = json.load(fp)
             data = [(key, value) for key, value in dict_json.items()]
             logger.info(f"Loaded {len(dict_json)} url entries")
-            query = "INSERT INTO hashes_url(url, hash) VALUES (?, ?)"
+            query = "INSERT OR IGNORE INTO hashes_url(url, hash) VALUES (?, ?)"
             try:
                 cursor.executemany(query, data)
             except OperationalError as e:
@@ -203,12 +229,18 @@ class RedditConnector(metaclass=ABCMeta):
         self.args.keep_hashes = False
         
     def __open_hash_db(self, path: Path):
-        try:
-            if self.__hash_db_conn is None:
-                self.__hash_db_conn = sqlite3.connect(path)
-        except Error as e:
-            logger.critical(f"Connection to SQLite DB failed: '{e}'")
-        
+        if self.__hash_db_conn is None:
+            try:
+                # Used from download threads with --parallel, always under RedditDownloader._store_lock
+                self.__hash_db_conn = sqlite3.connect(path, check_same_thread=False)
+            except Error as e:
+                raise errors.BulkDownloaderException(f"Could not open hash DB {path}: {e}")
+
+    def close_hash_db(self):
+        if self.__hash_db_conn is not None:
+            self.__hash_db_conn.close()
+            self.__hash_db_conn = None
+
     def __create_hash_db(self, path: Path):
         self.__open_hash_db(path)
 
@@ -236,7 +268,7 @@ class RedditConnector(metaclass=ABCMeta):
             """
             cursor.execute(query)
             self.__hash_db_conn.commit()
-            logger.info("Hash tables created successfully")
+            logger.debug("Hash tables created successfully")
         except Error as e:
             logger.critical(f"Error creating hash tables: '{e}'")
 
@@ -264,16 +296,14 @@ class RedditConnector(metaclass=ABCMeta):
                 "DEFAULT", "filename_restriction_scheme", fallback=None
             )
             logger.debug(f"Setting filename restriction scheme to '{self.args.filename_restriction_scheme}'")
-        # Update config on disk
-        with Path(self.config_location).open(mode="w") as file:
-            self.cfg_parser.write(file)
 
     def parse_disabled_modules(self):
         disabled_modules = self.args.disable_module
         disabled_modules = self.split_args_input(disabled_modules)
         disabled_modules = {name.strip().lower() for name in disabled_modules}
         self.args.disable_module = disabled_modules
-        logger.debug(f'Disabling the following modules: {", ".join(self.args.disable_module)}')
+        if self.args.disable_module:
+            logger.debug(f'Disabling the following modules: {", ".join(self.args.disable_module)}')
 
     def create_reddit_instance(self):
         if self.args.authenticate:
@@ -297,6 +327,7 @@ class RedditConnector(metaclass=ABCMeta):
                 client_id=self.cfg_parser.get("DEFAULT", "client_id"),
                 client_secret=self.cfg_parser.get("DEFAULT", "client_secret"),
                 user_agent=socket.gethostname(),
+                check_for_updates=False,
                 refresh_token=self.cfg_parser.get("DEFAULT", "user_token"),
             )
         else:
@@ -306,9 +337,14 @@ class RedditConnector(metaclass=ABCMeta):
                 client_id=self.cfg_parser.get("DEFAULT", "client_id"),
                 client_secret=self.cfg_parser.get("DEFAULT", "client_secret"),
                 user_agent=socket.gethostname(),
+                check_for_updates=False,
             )
 
     def retrieve_reddit_lists(self) -> list[praw.models.ListingGenerator]:
+        if self.arctic_shift:
+            return self.get_arctic_shift_lists()
+        # Without the archive, exported posts are fetched from Reddit by ID
+        self.args.link.extend(post["id"] for post in self.exported_posts)
         master_list = []
         master_list.extend(self.get_subreddits())
         logger.log(9, "Retrieved subreddits")
@@ -320,6 +356,53 @@ class RedditConnector(metaclass=ABCMeta):
         logger.log(9, "Retrieved submissions for given links")
         return master_list
 
+    def get_arctic_shift_lists(self) -> list[Iterator]:
+        for option, name in (
+            ("saved", "--saved"),
+            ("upvoted", "--upvoted"),
+            ("subscribed", "--subscribed"),
+            ("multireddit", "--multireddit"),
+            ("search", "--search"),
+        ):
+            if getattr(self.args, option):
+                logger.error(f"{name} needs Reddit's API and is not available with --source arctic-shift")
+        # Listings are always newest first; the time filter limits how far back they go
+        time_windows = {"hour": 3600, "day": 86400, "week": 604800, "month": 2592000, "year": 31536000}
+        after = None
+        if self.time_filter.value in time_windows:
+            after = int(datetime.now().timestamp()) - time_windows[self.time_filter.value]
+
+        out = []
+        for subreddit in self.split_args_input(self.args.subreddit):
+            logger.debug(f"Added submissions from subreddit {subreddit} via Arctic Shift")
+            out.append(self.arctic_shift.submissions(subreddit=subreddit, limit=self.args.limit, after=after))
+        if self.args.submitted:
+            if not self.args.user:
+                logger.warning("At least one user must be supplied to download user data")
+            for user in self.args.user:
+                logger.debug(f"Retrieving submitted posts of user {user} via Arctic Shift")
+                out.append(self.arctic_shift.submissions(author=user, limit=self.args.limit, after=after))
+
+        posts = {post["id"]: post for post in self.exported_posts}
+        for link in self.args.link:
+            if submission_id := submission_id_from_link(link):
+                posts.setdefault(submission_id, {"id": submission_id})
+            else:
+                logger.error(f"Could not find a submission ID in {link}")
+        if posts:
+            filter_on_ratio = self.args.min_score_ratio or self.args.max_score_ratio
+
+            def needs_lookup(post: dict) -> Optional[str]:
+                # Exported posts carry no upvote ratio, so the archive is needed to filter on it
+                if filter_on_ratio and "upvote_ratio" not in post:
+                    return "upvote ratio needed for --min/--max-score-ratio"
+                return ArcticShift.needs_lookup(post)
+
+            # Given posts go first: they are what was asked for, and may be newer than the archive's listings
+            self.post_list = self.arctic_shift.submissions_from_posts(posts.values(), needs_lookup)
+            out.insert(0, self.post_list)
+        return out
+
     def determine_directories(self):
         self.download_directory = Path(self.args.directory).resolve().expanduser()
         self.config_directory = Path(self.config_directories.user_config_dir)
@@ -330,10 +413,11 @@ class RedditConnector(metaclass=ABCMeta):
     def load_config(self):
         self.cfg_parser = configparser.ConfigParser()
         if self.args.config:
-            if (cfg_path := Path(self.args.config)).exists():
-                self.cfg_parser.read(cfg_path)
-                self.config_location = cfg_path
-                return
+            if not (cfg_path := Path(self.args.config)).exists():
+                raise errors.BulkDownloaderException(f"Config file {cfg_path} does not exist")
+            self.cfg_parser.read(cfg_path)
+            self.config_location = cfg_path
+            return
         possible_paths = [
             Path("./config.cfg"),
             Path("./default_config.cfg"),
@@ -347,11 +431,11 @@ class RedditConnector(metaclass=ABCMeta):
                 logger.debug(f"Loading configuration from {path}")
                 break
         if not self.config_location:
+            # Use a copy in the user's config directory so the packaged file is never written to (e.g. by OAuth)
+            self.config_location = Path(self.config_directory, "default_config.cfg")
             with importlib.resources.path("bdfr", "default_config.cfg") as path:
-                self.config_location = path
-                shutil.copy(self.config_location, Path(self.config_directory, "default_config.cfg"))
-        if not self.config_location:
-            raise errors.BulkDownloaderException("Could not find a configuration file to load")
+                shutil.copy(path, self.config_location)
+            logger.debug(f"Created configuration at {self.config_location}")
         self.cfg_parser.read(self.config_location)
 
     def create_file_logger(self) -> logging.handlers.RotatingFileHandler:
@@ -379,7 +463,9 @@ class RedditConnector(metaclass=ABCMeta):
                 raise
         formatter = logging.Formatter("[%(asctime)s - %(name)s - %(levelname)s] - %(message)s")
         file_handler.setFormatter(formatter)
-        file_handler.setLevel(0)
+        # The file always gets debug lines; the finer level 9 tracing (filters, file name indexes, request URLs)
+        # only with -vv, as on the console
+        file_handler.setLevel(0 if (self.args.verbose or 0) >= 2 else logging.DEBUG)
         return file_handler
 
     @staticmethod
@@ -604,12 +690,18 @@ class RedditConnector(metaclass=ABCMeta):
         return out.keys()
 
     @staticmethod
-    def scan_existing_files(directory: Path, keep_hashes: bool) -> (dict[str, Path], dict[str, str], dict[str, str]):
+    def scan_existing_files(
+        directory: Path, keep_hashes: bool, known_files: Optional[set[str]] = None
+    ) -> (dict[str, Path], dict[str, str], dict[str, str]):
+        """Hashes the files in directory, skipping those already in the JSON hash files (keep_hashes) or in
+        known_files"""
         if keep_hashes:
             (hash_list_loaded, filename_list_loaded, url_list) = RedditConnector._load_hash_list(directory)
         files = []
         for (dirpath, _dirnames, filenames) in os.walk(directory):
-            files.extend([Path(dirpath, file) for file in filenames])
+            files.extend([Path(dirpath, file) for file in filenames if not RedditConnector._is_own_file(file)])
+        if known_files:
+            files = [file for file in files if str(file) not in known_files]
         if keep_hashes:
             files_new = list()
             for file in files:
@@ -617,11 +709,13 @@ class RedditConnector(metaclass=ABCMeta):
                     files_new.append(file)
             files = []
             files.extend(files_new)
-        logger.info(f"Calculating hashes for {len(files)} files")
-
-        pool = Pool(15)
-        results = pool.map(_calc_hash, files)
-        pool.close()
+        if files:
+            logger.info(f"Calculating hashes for {len(files)} files not in the hash store yet")
+            with Pool() as pool:
+                results = pool.map(_calc_hash, files, chunksize=16)
+        else:
+            logger.debug("Every file in the download folder is already in the hash store")
+            results = []
 
         hash_list = {res[1]: res[0] for res in results}
         filename_list = {}
@@ -667,30 +761,48 @@ class RedditConnector(metaclass=ABCMeta):
         return (hash_list, filename_list, url_list)
 
     @staticmethod
-    def _save_hash_list(directory: Path, hash_list: dict[str, Path], filename_list: dict[str, str], url_list: dict[str, str]):
-        dict_json = {}
-        for x in hash_list:
-            dict_json[x] = str(hash_list[x])
-        fn = os.path.join(directory, "hash_list.json")
-        if os.path.exists(fn):
-            os.replace(fn, fn + '.bak')
-        with open(fn, 'w') as fp:
-            json.dump(dict_json, fp)
+    def _save_hash_list(
+        directory: Path, hash_list: dict[str, Path], filename_list: dict[str, str], url_list: dict[str, str]
+    ):
+        hash_json = {file_hash: str(path) for file_hash, path in hash_list.items()}
+        RedditConnector._write_json(os.path.join(directory, "hash_list.json"), hash_json)
         logger.info(f"Saved {len(hash_list)} hashes")
-
-        fn = os.path.join(directory, "hash_file_list.json")
-        if os.path.exists(fn):
-            os.replace(fn, fn + '.bak')
-        with open(fn, 'w') as fp:
-            json.dump(filename_list, fp)
+        RedditConnector._write_json(os.path.join(directory, "hash_file_list.json"), filename_list)
         logger.info(f"Saved {len(filename_list)} file entries")
-
-        fn = os.path.join(directory, "hash_url_list.json")
-        if os.path.exists(fn):
-            os.replace(fn, fn + '.bak')
-        with open(fn, 'w') as fp:
-            json.dump(url_list, fp)
+        RedditConnector._write_json(os.path.join(directory, "hash_url_list.json"), url_list)
         logger.info(f"Saved {len(url_list)} url entries")
+
+    @staticmethod
+    def _write_json(fn: str, data: dict):
+        # Write to a temporary file first so an interrupted save never leaves a truncated file behind
+        with open(fn + ".tmp", "w") as fp:
+            json.dump(data, fp)
+        if os.path.exists(fn):
+            os.replace(fn, fn + ".bak")
+        os.replace(fn + ".tmp", fn)
+
+    @staticmethod
+    def _is_own_file(name: str) -> bool:
+        """BDFR's hash stores, their backups and `bdfr rename` undo lists live in the download directory but are not
+        downloads"""
+        own = ("hash_list.json", "hash_file_list.json", "hash_url_list.json", "bdfr-rename-")
+        return name.startswith(own) or name.startswith(RedditConnector.__HASH_DB_NAME)
+
+    def _hashed_files_in_db(self) -> Optional[set[str]]:
+        if not self.args.keep_hashes_db:
+            return None
+        rows = self.__hash_db_conn.execute("SELECT file_path FROM hashes_file").fetchall()
+        return {os.fsdecode(row[0]) for row in rows}
+
+    def _add_scanned_hashes_to_db(self, hash_list: dict[str, Path]):
+        data = [(file_hash, os.fsencode(str(path))) for file_hash, path in hash_list.items()]
+        with self.__hash_db_conn:
+            self.__hash_db_conn.executemany("INSERT OR IGNORE INTO hashes(hash, file_path) VALUES (?, ?)", data)
+            self.__hash_db_conn.executemany(
+                "INSERT OR IGNORE INTO hashes_file(file_path, hash) VALUES (?, ?)", [(p, h) for h, p in data]
+            )
+        if data:
+            logger.info(f"Added {len(data)} scanned hashes to the hash DB")
 
     def _hash_list_save(self, periodic: bool):
         # no save necessary for keep_hashes_db, only for keep_hashes
@@ -749,7 +861,7 @@ class RedditConnector(metaclass=ABCMeta):
                 cursor.close()
                 return True
             if hash is not None:
-                query = "INSERT INTO hashes_url(url, hash) VALUES (?, ?)"
+                query = "INSERT OR IGNORE INTO hashes_url(url, hash) VALUES (?, ?)"
                 cursor.execute(query, (url, hash))
                 self.__hash_db_conn.commit()
             cursor.close()
@@ -773,4 +885,41 @@ class RedditConnector(metaclass=ABCMeta):
             else:
                 return None
         else:
-            return self.master_hash_list[hash]
+            return self.master_hash_list.get(hash)
+
+    def _get_url_hash(self, url: str) -> Optional[str]:
+        """The hash stored for a downloaded media URL, if any"""
+        if self.args.keep_hashes_db:
+            row = self.__hash_db_conn.execute("SELECT hash FROM hashes_url WHERE url = ?", [url]).fetchone()
+            return row[0] if row else None
+        if self.args.keep_hashes:
+            return self.master_url_list.get(url)
+        return None
+
+    def _get_file_hash(self, path: Path) -> Optional[str]:
+        """The hash stored for a file, if any"""
+        if self.args.keep_hashes_db:
+            query = "SELECT hash FROM hashes_file WHERE file_path = ?"
+            row = self.__hash_db_conn.execute(query, [os.fsencode(str(path))]).fetchone()
+            return row[0] if row else None
+        if self.args.keep_hashes:
+            return self.master_file_list.get(str(path))
+        return None
+
+    def _move_hashed_file(self, old_path: Path, new_path: Path, file_hash: str):
+        """Points the hash store at a file's new name after it was renamed"""
+        if self.args.keep_hashes_db:
+            old, new = os.fsencode(str(old_path)), os.fsencode(str(new_path))
+            with self.__hash_db_conn:
+                self.__hash_db_conn.execute("UPDATE hashes SET file_path = ? WHERE hash = ?", (new, file_hash))
+                self.__hash_db_conn.execute("DELETE FROM hashes_file WHERE file_path = ?", (old,))
+                self.__hash_db_conn.execute(
+                    "INSERT OR REPLACE INTO hashes_file(file_path, hash) VALUES (?, ?)", (new, file_hash)
+                )
+        elif self.args.keep_hashes:
+            self.master_hash_list[file_hash] = str(new_path)
+            self.master_file_list.pop(str(old_path), None)
+            self.master_file_list[str(new_path)] = file_hash
+            self._hash_list_save(True)
+        else:
+            self.master_hash_list[file_hash] = new_path

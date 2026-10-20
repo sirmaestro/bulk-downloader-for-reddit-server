@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.exceptions import NotADownloadableLinkError
 from bdfr.resource import Resource
 from bdfr.site_downloaders.youtube import Youtube
@@ -22,7 +23,7 @@ from bdfr.site_downloaders.youtube import Youtube
 def test_find_resources_good(test_url: str, expected_hash: str):
     test_submission = MagicMock()
     test_submission.url = test_url
-    downloader = Youtube(test_submission)
+    downloader = Youtube(test_submission, Configuration())
     resources = downloader.find_resources()
     assert len(resources) == 1
     assert isinstance(resources[0], Resource)
@@ -41,6 +42,6 @@ def test_find_resources_good(test_url: str, expected_hash: str):
 def test_find_resources_bad(test_url: str):
     test_submission = MagicMock()
     test_submission.url = test_url
-    downloader = Youtube(test_submission)
+    downloader = Youtube(test_submission, Configuration())
     with pytest.raises(NotADownloadableLinkError):
         downloader.find_resources()

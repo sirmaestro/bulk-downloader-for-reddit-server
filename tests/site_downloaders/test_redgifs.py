@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from bdfr.configuration import Configuration
 from bdfr.resource import Resource
 from bdfr.site_downloaders.redgifs import Redgifs
 
@@ -80,7 +81,7 @@ def test_get_link(test_url: str, expected: set[str]):
 def test_download_resource(test_url: str, expected_hashes: set[str]):
     mock_submission = Mock()
     mock_submission.url = test_url
-    test_site = Redgifs(mock_submission)
+    test_site = Redgifs(mock_submission, Configuration())
     results = test_site.find_resources()
     assert all([isinstance(res, Resource) for res in results])
     [res.download() for res in results]
@@ -116,7 +117,7 @@ def test_hd_soft_fail(test_url: str, expected_link: set[str], expected_hash: set
     assert all([re.match(p, r) for p in patterns] for r in link)
     mock_submission = Mock()
     mock_submission.url = test_url
-    test_site = Redgifs(mock_submission)
+    test_site = Redgifs(mock_submission, Configuration())
     results = test_site.find_resources()
     assert all([isinstance(res, Resource) for res in results])
     [res.download() for res in results]
