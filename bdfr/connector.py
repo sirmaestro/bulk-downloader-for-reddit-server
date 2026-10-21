@@ -466,13 +466,15 @@ class RedditConnector(metaclass=ABCMeta):
             if not log_path.parent.exists():
                 raise errors.BulkDownloaderException("Designated location for logfile does not exist")
         backup_count = self.cfg_parser.getint("DEFAULT", "backup_log_count", fallback=3)
+        rotate_bytes = getattr(self.args, "log_rotate_bytes", 0) or 0
         file_handler = logging.handlers.RotatingFileHandler(
             log_path,
             mode="a",
+            maxBytes=rotate_bytes,
             backupCount=backup_count,
             encoding="utf-8"
         )
-        if log_path.exists():
+        if log_path.exists() and not rotate_bytes:
             try:
                 file_handler.doRollover()
             except PermissionError:

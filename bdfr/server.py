@@ -32,6 +32,8 @@ DEFAULT_PORT = 7635
 MAX_BODY_BYTES = 20 * 1024 * 1024
 MAX_POSTS_PER_JOB = 5000
 MAX_FINISHED_JOBS = 50
+# serve_log.txt rotates at this size (keeping the config's backup_log_count old files), not at every job
+SERVE_LOG_BYTES = 10 * 1024 * 1024
 # One folder name directly under the root, so a request can't write anywhere else
 FOLDER_PATTERN = re.compile(r"[\w\-. ]{1,100}")
 USER_PATTERN = re.compile(r"[\w-]{1,30}")
@@ -227,6 +229,7 @@ class DownloadServer:
         args.directory = str(self.root / job.folder)
         args.source = "arctic-shift"
         args.log = str(self.log_path)
+        args.log_rotate_bytes = SERVE_LOG_BYTES
         for key in ("subreddit", "user", "link", "include_id_file", "post_json", "multireddit"):
             setattr(args, key, [])
         args.submitted = args.saved = args.upvoted = args.subscribed = False

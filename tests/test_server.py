@@ -128,6 +128,15 @@ def test_user_job_with_page_posts(server):
     assert args.user == ["someone"] and args.submitted and args.stop_at_existing == 5
 
 
+def test_jobs_keep_log_history(server):
+    """Each job's downloader opens the serve log; it must append (rotating by size), not start a new file per job"""
+    _, base = server
+    job = wait_for(base, call(base, "POST", "/jobs", {"folder": "a", "user": "someone"})[1]["id"])
+    assert job["state"] == "done"
+    args, _ = FakeDownloader.runs[0]
+    assert args.log_rotate_bytes >= 1024 * 1024
+
+
 def test_load_token_is_stable(tmp_path: Path):
     token = load_token(tmp_path)
     assert len(token) > 20
