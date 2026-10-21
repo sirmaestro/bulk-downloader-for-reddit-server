@@ -98,6 +98,8 @@ users:
     folder: Some folder
 ```
 
+To run it on an always-on machine, use the [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml): set the download folder, the user ID that should own the files and `BDFR_TOKEN`, then `docker compose up -d --build`. The watchlist goes in `config/bdfr/watchlist.yaml`. The container listens on the network (`--host 0.0.0.0`), so in the userscript's ⚙ use the machine's LAN address, e.g. `http://192.168.1.20:7635`. The token is the only protection and isn't encrypted, so keep the port inside your home network.
+
 A user's first check reads their whole archive. After that, each check reads every archived post since the previous check (plus the overlap) to its end, so posts missing between downloaded ones are found too; posts already in the folder cost no requests, so a quiet week is one request. Checks run one at a time with a minute between them, and the file is read again as it changes, so there's no need to restart. A check that fails (Arctic Shift unavailable, ...) is logged as a warning and its window is read again later, so nothing is skipped. `GET /watchlist` (with the token) shows each user's last successful check, last error and next check; progress is in `watchlist_state.json` next to the watchlist.
 
 ## Options

@@ -1,0 +1,17 @@
+# docker compose up -d --build
+# Then put watchlist.yaml in ./config/bdfr/ (see README, "Watched users") and point the userscript (⚙) at
+# http://<this machine's LAN address>:7635 with the token below.
+services:
+  bdfr:
+    build: .
+    restart: unless-stopped
+    # Files are written as this user; match the owner of the download folder on the host
+    user: "1000:1000"
+    ports:
+      - "7635:7635"
+    environment:
+      # Leave unset to have serve generate one into ./config/bdfr/serve_token.txt
+      BDFR_TOKEN: "change-me-to-a-long-random-string"
+    volumes:
+      - /srv/reddit:/data        # the folder holding one folder per user
+      - ./config:/config

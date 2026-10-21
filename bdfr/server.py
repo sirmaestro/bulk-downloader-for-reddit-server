@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """Local HTTP server behind `bdfr serve`, which runs downloads requested by the Tampermonkey script
-(scripts/tampermonkey/bdfr-export.user.js). It only listens on 127.0.0.1 and every request needs the token."""
+(scripts/tampermonkey/bdfr-export.user.js). It listens on 127.0.0.1 unless given --host (e.g. in Docker), and every
+request needs the token."""
 
 import copy
 import json
@@ -276,6 +277,8 @@ class DownloadServer:
         job.state = "running"
         started = time.time()
         logger.info(f"Starting job {job.id}: {self._describe(job)}")
+        # The outcome is published once the job is cleaned up, so whoever sees it finished sees it complete
+        state, error = "failed", None
         try:
             downloader = RedditDownloader(args)
             # Repeated once the downloader's log file is open, so each job's log says what it was for and how
@@ -284,21 +287,18 @@ class DownloadServer:
             downloader.download()
             if downloader.errors:
                 # A listing stopped part way (e.g. Arctic Shift unavailable) must not look like nothing new
-                job.state = "failed"
-                job.error = "; ".join(downloader.errors)
+                error = "; ".join(downloader.errors)
             else:
-                job.state = "done"
+                state = "done"
         except Exception as e:
             logger.exception(f"Job {job.id} failed")
-            job.state = "failed"
-            job.error = str(e)
+            error = str(e)
         finally:
-            job.finished = time.time()
             c = job.counts
             logger.info(
-                f"Finished job {job.id} ({job.state}) in {self._duration(job.finished - started)}: {c['new']} new, "
+                f"Finished job {job.id} ({state}) in {self._duration(time.time() - started)}: {c['new']} new, "
                 f"{c['existing']} already downloaded, {c['duplicate']} duplicates, {c['skipped']} skipped"
-                + (f" - {job.error}" if job.error else "")
+                + (f" - {error}" if error else "")
             )
             # Each downloader adds its own file log handler to the root logger
             for handler in [h for h in root_logger.handlers if h not in handlers_before]:
@@ -306,6 +306,9 @@ class DownloadServer:
                 handler.close()
             if post_file:
                 post_file.unlink(missing_ok=True)
+            job.error = error
+            job.state = state
+            job.finished = time.time()
             if job.on_finish:
                 try:
                     job.on_finish(job)
@@ -410,7 +413,9 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
 
 
 def load_token(config_directory: Path) -> str:
-    """The token is kept next to BDFR's configuration, created on first use"""
+    """The token is BDFR_TOKEN when set (e.g. in Docker), or kept next to BDFR's configuration, created on first use"""
+    if token := os.environ.get("BDFR_TOKEN", "").strip():
+        return token
     token_path = config_directory / "serve_token.txt"
     if token_path.exists() and (token := token_path.read_text(encoding="utf-8").strip()):
         return token
@@ -432,8 +437,14 @@ def run_server(base_args: Configuration, port: int):
     server.scheduler = BaselineScheduler(server, watchlist)
     server.scheduler.start()
     logger.info(f"Watched users are read from {watchlist}" + ("" if watchlist.exists() else " (not there yet)"))
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(server))
-    logger.info(f"Listening on http://127.0.0.1:{port}, downloading into folders under {root}")
+    host = base_args.host or "127.0.0.1"
+    httpd = ThreadingHTTPServer((host, port), make_handler(server))
+    logger.info(f"Listening on http://{host}:{port}, downloading into folders under {root}")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            f"Listening on {host}: other machines on the network can reach the server. Every request needs the token, "
+            "but it is sent unencrypted, so only do this on a network you trust"
+        )
     logger.info(f"Token for the Tampermonkey script: {token}")
     try:
         httpd.serve_forever()

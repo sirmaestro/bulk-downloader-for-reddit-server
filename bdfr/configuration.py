@@ -54,6 +54,8 @@ class Configuration(Namespace):
         self.log_rotate_bytes: int = 0
         # serve only: the watched users' file (default: watchlist.yaml next to BDFR's configuration)
         self.watchlist: Optional[str] = None
+        # serve only: the address to listen on (default 127.0.0.1)
+        self.host: Optional[str] = None
         self.rename_existing: bool = False
         # None picks the command's default: arctic-shift for download, reddit for archive and clone
         self.source: Optional[str] = None

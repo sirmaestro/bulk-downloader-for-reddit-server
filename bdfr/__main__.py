@@ -240,6 +240,12 @@ SERVE_DEFAULTS = {
     help=f"Port to listen on (default {DEFAULT_PORT}).",
 )
 @click.option(
+    "--host",
+    default=None,
+    help="Address to listen on (default 127.0.0.1, this computer only). 0.0.0.0 lets other machines reach it, "
+    "e.g. from Docker; the token then travels the network unencrypted.",
+)
+@click.option(
     "--watchlist",
     type=click.Path(dir_okay=False),
     default=None,

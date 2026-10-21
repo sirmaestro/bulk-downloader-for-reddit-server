@@ -142,6 +142,57 @@ def test_jobs_keep_log_history(server):
     assert args.log_rotate_bytes >= 1024 * 1024
 
 
+def test_token_from_environment(tmp_path: Path, monkeypatch):
+    """In Docker the token can be given as BDFR_TOKEN instead of being generated into the config volume"""
+    monkeypatch.setenv("BDFR_TOKEN", "  from-env  ")
+    assert load_token(tmp_path) == "from-env"
+    assert not (tmp_path / "serve_token.txt").exists()
+    monkeypatch.setenv("BDFR_TOKEN", "")
+    assert load_token(tmp_path) == load_token(tmp_path) != ""
+
+
+class StopServing(ThreadingHTTPServer):
+    addresses = []
+
+    def __init__(self, address, handler):
+        StopServing.addresses.append(address)
+
+    def serve_forever(self, poll_interval=0.5):
+        raise KeyboardInterrupt
+
+    def server_close(self):
+        pass
+
+
+@pytest.mark.parametrize(("host", "expected", "warns"), ((None, "127.0.0.1", False), ("0.0.0.0", "0.0.0.0", True)))
+def test_run_server_host(tmp_path: Path, caplog, host, expected, warns):
+    from bdfr.server import run_server
+
+    StopServing.addresses = []
+    args = Configuration()
+    args.directory = str(tmp_path / "root")
+    args.watchlist = str(tmp_path / "watchlist.yaml")
+    args.host = host
+    with patch("bdfr.server.ThreadingHTTPServer", StopServing), patch(
+        "bdfr.server.appdirs.user_config_dir", lambda *a: str(tmp_path / "config")
+    ), caplog.at_level("INFO"):
+        run_server(args, 7635)
+    assert StopServing.addresses == [(expected, 7635)]
+    assert f"http://{expected}:7635" in caplog.text
+    assert ("other machines" in caplog.text) is warns
+
+
+def test_serve_host_option(tmp_path: Path):
+    from click.testing import CliRunner
+
+    from bdfr.__main__ import cli
+
+    captured = {}
+    with patch("bdfr.__main__.run_server", lambda config, port: captured.update(config=config)):
+        CliRunner().invoke(cli, ["serve", str(tmp_path), "--host", "0.0.0.0"])
+    assert captured["config"].host == "0.0.0.0"
+
+
 def test_load_token_is_stable(tmp_path: Path):
     token = load_token(tmp_path)
     assert len(token) > 20
