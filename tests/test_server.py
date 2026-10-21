@@ -28,6 +28,7 @@ class FakeDownloader:
         self.args = args
         self.progress_callback = None
         self.errors = []
+        self.newest_post = None
 
     def download(self):
         post_ids = []
@@ -275,7 +276,7 @@ def test_known_posts_by_link(server, tmp_path: Path, store: str):
                 "keep_hashes_db": True,
                 "folder_scheme": "",
                 "file_scheme": "{POSTID}_{TITLE}",
-                "parallel": 4,
+                "parallel": 8,
             },
         ),
         (
@@ -358,3 +359,24 @@ def test_user_job_after_reads_the_whole_window(server):
     args, _ = FakeDownloader.runs[0]
     assert args.listing_after == 1792210918
     assert args.stop_at_existing == 0
+
+
+def test_watchlist_gone_endpoint(server, tmp_path: Path):
+    from bdfr.scheduler import BaselineScheduler
+
+    download_server, base = server
+    assert call(base, "POST", "/watchlist/gone", {"user": "someone", "gone": "deleted"}) == (
+        400,
+        {"error": "serve has no watchlist"},
+    )
+    (tmp_path / "watchlist.yaml").write_text("users: [someone]\n", encoding="utf-8")
+    download_server.scheduler = BaselineScheduler(download_server, tmp_path / "watchlist.yaml")
+    assert call(base, "POST", "/watchlist/gone", {"user": "someone", "gone": "deleted"}) == (
+        200,
+        {"user": "someone", "gone": "deleted"},
+    )
+    _, watchlist = call(base, "GET", "/watchlist")
+    assert watchlist["users"] == [] and watchlist["gone"][0]["name"] == "someone"
+    assert call(base, "POST", "/watchlist/gone", {"user": "bad name!", "gone": None})[0] == 400
+    assert call(base, "POST", "/watchlist/gone", {"user": "someone", "gone": None})[0] == 200
+    assert [user["name"] for user in call(base, "GET", "/watchlist")[1]["users"]] == ["someone"]

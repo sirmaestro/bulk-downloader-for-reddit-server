@@ -12,6 +12,7 @@ import pytest
 
 from bdfr.__main__ import SERVE_DEFAULTS
 from bdfr.configuration import Configuration
+from bdfr.scheduler import BaselineScheduler
 from bdfr.server import DownloadServer, Job
 from tests.mock_arctic_shift import MockArcticShift
 
@@ -64,6 +65,8 @@ def test_user_job_downloads_from_the_archive(serve: DownloadServer, archive: Moc
     # Listing pages only; the posts link straight to media, so nothing is looked up
     assert archive.endpoint_requests("posts/search")
     assert archive.endpoint_requests("posts/ids") == []
+    # The scheduler's measure of how quiet the user is
+    assert job.newest_post == NOW
 
 
 @pytest.mark.parametrize(
@@ -110,6 +113,7 @@ def test_user_job_after_reads_only_the_window(serve: DownloadServer, archive: Mo
     job = run(serve, {"folder": "someone", "user": "someone", "after": NOW - 7 * DAY})
     assert job.state == "done", job.error
     assert sorted(job.results) == ["new0001", "new0002"]
+    assert job.newest_post == NOW - DAY
     searches = archive.endpoint_requests("posts/search")
     assert searches and all(params.get("after") == str(NOW - 7 * DAY) for params in searches)
 
@@ -136,3 +140,19 @@ def test_failed_lookup_of_given_posts_fails_the_job(serve: DownloadServer, archi
     job = run(serve, {"folder": "someone", "posts": [dict(archive.posts["abc0001"])]})
     assert job.state == "failed"
     assert "Arctic Shift" in job.error
+
+
+def test_posts_for_users_without_archive_checks_are_not_looked_up(
+    serve: DownloadServer, archive: MockArcticShift, tmp_path: Path
+):
+    """A gallery Reddit dropped the image list of fails as removed instead of being looked up in the archive"""
+    (tmp_path / "watchlist.yaml").write_text("users: [someone]\n", encoding="utf-8")
+    serve.scheduler = BaselineScheduler(serve, tmp_path / "watchlist.yaml")
+    serve.scheduler.tick()
+    archive.add_post("abc0001", NOW, url="https://www.reddit.com/gallery/abc0001")
+    post = dict(archive.posts["abc0001"], removed_by_category="moderator")
+    post.pop("gallery_data", None)
+    job = run(serve, {"folder": "someone", "posts": [post]})
+    assert job.state == "done"
+    assert job.results == {"abc0001": "skipped"}
+    assert archive.requests == []

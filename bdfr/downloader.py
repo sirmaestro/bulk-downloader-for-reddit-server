@@ -62,6 +62,8 @@ class Downloader(Connector):
         self.progress_callback: Optional[Callable[[str, Optional[bool], str], None]] = None
         # Why listings were stopped before their end in download(); the run didn't see everything it was asked to
         self.errors: list[str] = []
+        # When the newest submission the run went through was posted (whatever happened to it), or None
+        self.newest_post: Optional[float] = None
 
     def _stop_at_existing_reached(self, result, consecutive_existing: int) -> (bool, int):
         # result: True = already downloaded, False = newly downloaded, None = neither (filtered or failed)
@@ -101,6 +103,9 @@ class Downloader(Connector):
                     self._log_outcome(number, submission, result, outcome)
                     totals[result] += 1
                     totals["files"] += outcome["files"]["written"] + outcome["files"]["linked"]
+                    created = getattr(submission, "created_utc", None)
+                    if isinstance(created, (int, float)) and (self.newest_post is None or created > self.newest_post):
+                        self.newest_post = created
                     if self.progress_callback:
                         self.progress_callback(submission.id, result, self.result_label(result, outcome))
                     if not stop_enabled:

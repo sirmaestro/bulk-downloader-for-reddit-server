@@ -40,7 +40,7 @@ The Tampermonkey script [scripts/tampermonkey/bdfr-export.user.js](scripts/tampe
     bdfr serve D:\red
     ```
 
-    By default `serve` runs as if given `--no-dupes --search-existing --keep-hashes-db --folder-scheme "" --file-scheme "{POSTID}_{TITLE}" --parallel 4 --media-only`: files go straight into each user's folder, named by post ID, with every file's hash kept in that folder's `hashes.sqlite`, duplicates skipped, and self posts and crossposts left out (as the script does). Options given on the command line or in `--opts` override these (in an `--opts` file, flags can be turned off, e.g. `no_dupes: false`), and `--no-defaults` uses the `download` command's defaults instead. `bdfr download` keeps its own defaults.
+    By default `serve` runs as if given `--no-dupes --search-existing --keep-hashes-db --folder-scheme "" --file-scheme "{POSTID}_{TITLE}" --parallel 8 --media-only`: files go straight into each user's folder, named by post ID, with every file's hash kept in that folder's `hashes.sqlite`, duplicates skipped, and self posts and crossposts left out (as the script does). Options given on the command line or in `--opts` override these (in an `--opts` file, flags can be turned off, e.g. `no_dupes: false`), and `--no-defaults` uses the `download` command's defaults instead. `bdfr download` keeps its own defaults.
 
     It listens on `http://127.0.0.1:7635` (change with `--port`) and prints a token, which is also saved as `serve_token.txt` in BDFR's [configuration directory](#configuration). Only programs on your computer can reach it, and every request must carry the token.
 
@@ -65,17 +65,28 @@ On every old.reddit page, links to a user's profile go to their submitted posts,
 
 ### Watched users
 
-`bdfr serve` keeps the folders of the users listed in `watchlist.yaml` (next to BDFR's [configuration](#configuration), or the file given with `--watchlist`) complete from Arctic Shift, without any clicks:
+`bdfr serve` keeps the folders of the users listed in `watchlist.yaml` (next to BDFR's [configuration](#configuration), or the file given with `--watchlist`) up to date without any clicks. By default only the userscript's background sync feeds them (free, from Reddit); the Arctic Shift archive is read only for users with archive checks on:
 
 ```yaml
+archive_checks: false  # true: read the archive for every user without their own 'archive' (default false)
 interval_days: 7    # how often each user's archive is checked
 overlap_days: 7     # each check starts this much before the previous one, for posts the archive got late
 retry_hours: 24     # a failed check is retried after this long
+hibernate_days: 60  # users with no post for this long aren't checked in the archive any more
+gone_active_days: 14   # suspended or deleted accounts that posted within this long are still synced as usual
+gone_recheck_days: 30  # after that they aren't synced or checked; looked at again after this long
 users:
   - someone                  # into the folder "someone"
   - name: someone_else
     folder: Some folder
+    archive: true            # read this user's whole archive once, then check it weekly
+  - name: new_account
+    aliases: [old_account]   # moved from old_account: its files belong in "new_account", and it isn't checked
 ```
+
+Archive checks also decide whether posts the userscript sends (its background sync, or Download without the archive) may be looked up in Arctic Shift. Without them, nothing is requested: a gallery Reddit no longer lists the images of (usually a removed post) is skipped as removed, although the archive may still have its images. A Download that reads the user's archive listing (an empty page, or the Archive checkbox) still looks posts up. Without a `watchlist.yaml`, posts are looked up as before.
+
+To move a user's old account into their new one, move the old folder's files into the new folder and list the old name under `aliases`. Moved files are hashed again when the next job for that folder starts (`--search-existing`), and their posts are recognised by the IDs in their file names; only the old folder's record of downloaded links is lost, unless its `hashes.sqlite` is merged too. Jobs and checks for the old name (e.g. Download on the old account's page) go to the new folder.
 
 
 ### Running in Docker
@@ -83,9 +94,9 @@ users:
 To run the server on an always-on machine, use the [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml): set the download folder, the user ID that should own the files and `BDFR_TOKEN`, then `docker compose up -d --build`. The watchlist goes in `config/bdfr/watchlist.yaml`. The container listens on the network (`--host 0.0.0.0`), so in the userscript's ⚙ use the machine's LAN address, e.g. `http://192.168.1.20:7635`. The token is the only protection and isn't encrypted, so keep the port inside your home network.
 
 
-Day to day, the userscript brings watched users' new posts from Reddit itself: on any old.reddit page you open, users not synced for 6 hours (`syncEveryHours` in `SETTINGS`) have their newest posts read with your login (`submitted.json`, 100 posts per request, 2 seconds apart) until 5 posts in a row are already downloaded, and the new media posts are sent to the server as a job. Galleries come with their images, so this costs Arctic Shift nothing. One tab syncs at a time, and nothing shows on the page; failures (logged out, a deleted or suspended user, the server unreachable, ...) are logged in the browser console (F12) as warnings starting `BDFR sync:`, and that user is tried again after an hour. For NSFW users, allow mature content in your Reddit preferences. Turn it off with `backgroundSync: false`. Reddit itself only lists a user's newest 1000 posts and nothing removed, which is what the weekly archive check below is for.
+Day to day, the userscript brings watched users' new posts from Reddit itself: on any old.reddit page you open, users not synced for 6 hours (`syncEveryHours` in `SETTINGS`) have their newest posts read with your login (`submitted.json`, 100 posts per request, 2 seconds apart) until 5 posts in a row are already downloaded, and the new media posts are sent to the server as a job. Galleries come with their images, so this costs Arctic Shift nothing. One tab syncs at a time, and nothing shows on the page; failures (logged out, the server unreachable, ...) are logged in the browser console (F12) as warnings starting `BDFR sync:`, and that user is tried again after an hour. A suspended or deleted account (Reddit answers 403 or 404 and the profile says so) is reported to the server and gets no archive checks. While its newest post is less than `gone_active_days` (14) old it is still synced as usual, since temporary suspensions and shadowbans get lifted; after that the server leaves it out of the sync, and every `gone_recheck_days` (30) it is looked at on Reddit once more, and any post of theirs sent to the server brings it back sooner. Reddit also answers 404 for shadowbanned accounts, so "deleted" isn't always for good. `GET /watchlist` lists these users under `gone`; hibernating users (no post for `hibernate_days`) are synced weekly, which is what notices them posting again, and aliases are never synced. For NSFW users, allow mature content in your Reddit preferences. To sync every watched user now, however recently they were synced, click Sync in the panel or pick "Sync watched users now" in Tampermonkey's menu on any old.reddit page. Clicking Sync again while it runs stops it after the current user; a Sync that didn't finish (stopped, tab closed, server down) is carried on by the next one within a day, skipping the users it already synced. The sync follows Reddit's rate limit: when Reddit says few requests are left it waits for the limit to reset (shown in the panel), and an HTTP 429 is waited out and retried up to 3 times. Its waits keep their pace in background tabs. Turn it off with `backgroundSync: false`. Reddit itself only lists a user's newest 1000 posts and nothing removed, which is what the archive checks below are for.
 
-A user's first check reads their whole archive. After that, each check reads every archived post since the previous check (plus the overlap) to its end, so posts missing between downloaded ones are found too; posts already in the folder cost no requests, so a quiet week is one request. Checks run one at a time with a minute between them, and the file is read again as it changes, so there's no need to restart. A check that fails (Arctic Shift unavailable, ...) is logged as a warning and its window is read again later, so nothing is skipped. `GET /watchlist` (with the token) shows each user's last successful check, last error and next check; progress is in `watchlist_state.json` next to the watchlist.
+For users with archive checks on, the first check reads their whole archive (once; `full_archive_done` in the progress file, so turning `archive: true` on for a user who was checked before still reads it all). After that, each check reads every archived post since the previous check (plus the overlap) to its end, so posts missing between downloaded ones are found too; posts already in the folder cost no requests, so a quiet week is one request. Checks run one at a time with a minute between them, and the file is read again as it changes, so there's no need to restart. A check that fails (Arctic Shift unavailable, ...) is logged as a warning and its window is read again later, so nothing is skipped. Users whose newest post is older than `hibernate_days` (stopped posting, banned, moved account) hibernate: the archive isn't read for them until the userscript sends a newer post. Scheduled checks wait until no job from the userscript is queued, so syncs and Download clicks don't wait behind a long archive read. `GET /watchlist` (with the token) shows each user's last successful check, last error, next check, newest post and whether they hibernate (and `alias_of` for aliases); progress is in `watchlist_state.json` next to the watchlist.
 
 ## Command-line downloads
 
@@ -381,7 +392,7 @@ The [scripts](scripts) folder has Bash and PowerShell scripts that read BDFR log
 - Redgifs
 - Vidble
 - YouTube
-    - Any site supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)
+    - Any site supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md), chosen from the link alone; links to other pages (OnlyFans, Fanvue, ...) are skipped without a request, as yt-dlp's generic page reader isn't used
 
 ## Contributing
 

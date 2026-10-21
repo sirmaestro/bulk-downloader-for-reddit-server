@@ -6,6 +6,7 @@
 request needs the token."""
 
 import copy
+import itertools
 import json
 import logging
 import os
@@ -72,6 +73,8 @@ class Job:
         self.error: Optional[str] = None
         self.counts = {label: 0 for label in LABELS}
         self.results: dict[str, str] = {}
+        # When the newest post the job went through was posted (used by the scheduler to notice quiet users)
+        self.newest_post: Optional[float] = None
         self.created = time.time()
         self.finished: Optional[float] = None
         self._lock = threading.Lock()
@@ -106,17 +109,21 @@ class DownloadServer:
         self.current: Optional[Job] = None
         # The weekly baseline for watched users (bdfr/scheduler.py), when serve runs one
         self.scheduler = None
-        self._queue: "queue.Queue[Job]" = queue.Queue()
+        # (priority, order, job): the userscript's jobs (0) run before the scheduler's (1), each in arrival order
+        self._queue: "queue.PriorityQueue[tuple[int, int, Job]]" = queue.PriorityQueue()
+        self._order = itertools.count()
         self._lock = threading.Lock()
         threading.Thread(target=self._worker, name="bdfr-serve-worker", daemon=True).start()
 
-    @staticmethod
-    def _folder(payload) -> str:
+    def _folder(self, payload) -> str:
         if not isinstance(payload, dict):
             raise ValueError("Expected a JSON object")
         folder = str(payload.get("folder", "")).strip()
         if not FOLDER_PATTERN.fullmatch(folder) or folder.strip(".") == "":
             raise ValueError("'folder' must be a single folder name of letters, digits, spaces, '-', '_' or '.'")
+        if self.scheduler is not None:
+            # An old account's page names its own folder, which was merged into the alias's folder
+            folder = self.scheduler.folder_for(folder)
         return folder
 
     def known_posts(self, payload: dict) -> dict:
@@ -191,7 +198,9 @@ class DownloadServer:
             return set()
         return stored
 
-    def submit(self, payload: dict, on_finish: Optional[Callable[[Job], None]] = None) -> Job:
+    def submit(self, payload: dict, on_finish: Optional[Callable[[Job], None]] = None, scheduled: bool = False) -> Job:
+        """Queues a job. Scheduled jobs (the watchlist's archive checks, which can take an hour) wait until no other
+        job is queued, so the userscript's syncs and Download clicks don't wait behind them."""
         folder = self._folder(payload)
         posts, user = payload.get("posts"), payload.get("user")
         if posts is None and user is None:
@@ -211,14 +220,28 @@ class DownloadServer:
             raise ValueError("'after' needs a 'user'")
         job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all", before, after)
         job.on_finish = on_finish
+        if posts and self.scheduler is not None:
+            # Posts read from Reddit by the userscript wake hibernating watched users
+            self.scheduler.note_posts(posts)
         with self._lock:
             self.jobs[job.id] = job
             finished = [j for j in self.jobs.values() if j.finished]
             for old in sorted(finished, key=lambda j: j.finished)[:-MAX_FINISHED_JOBS]:
                 del self.jobs[old.id]
-        self._queue.put(job)
+        self._queue.put((1 if scheduled else 0, next(self._order), job))
         logger.info(f"Queued job {job.id}: {self._describe(job)}")
         return job
+
+    def note_gone(self, payload: dict) -> dict:
+        """POST /watchlist/gone: the userscript found a watched user suspended or deleted on Reddit ("gone":
+        "suspended" | "deleted"), or there after all (null)"""
+        if self.scheduler is None:
+            raise ValueError("serve has no watchlist")
+        user = payload.get("user") if isinstance(payload, dict) else None
+        if not isinstance(user, str) or not USER_PATTERN.fullmatch(user):
+            raise ValueError("'user' must be a Reddit username")
+        self.scheduler.note_gone(user, payload.get("gone"))
+        return {"user": user, "gone": payload.get("gone")}
 
     def watchlist(self) -> dict:
         """The watched users with their baseline state, for GET /watchlist (the userscript's background sync)"""
@@ -236,7 +259,7 @@ class DownloadServer:
 
     def _worker(self):
         while True:
-            job = self._queue.get()
+            _priority, _order, job = self._queue.get()
             self.current = job
             try:
                 self._run(job)
@@ -259,6 +282,10 @@ class DownloadServer:
                 json.dump({"posts": job.posts}, file)
                 post_file = Path(file.name)
             args.post_json = [str(post_file)]
+            if not job.user and self.scheduler is not None:
+                # Archive checks off for the folder's user (the watchlist's default): Arctic Shift isn't asked for
+                # anything, not even the data of single posts
+                args.archive_lookups = self.scheduler.archive_lookups(job.folder)
         if job.user:
             # The page's posts are downloaded first, then the user's listing: until already-downloaded posts, or all
             # of it. Posts already in the folder are recognised from their IDs without requests, so reading the whole
@@ -283,6 +310,7 @@ class DownloadServer:
             logger.debug(f"Job {job.id}: {self._describe(job)}; {self._options(args)}")
             downloader.progress_callback = job.record
             downloader.download()
+            job.newest_post = downloader.newest_post
             if downloader.errors:
                 # A listing stopped part way (e.g. Arctic Shift unavailable) must not look like nothing new
                 error = "; ".join(downloader.errors)
@@ -330,6 +358,8 @@ class DownloadServer:
         ]
         parts = [f"--{name.replace('_', '-')}" for name in flags]
         parts.append(f"--parallel {args.parallel}")
+        if not getattr(args, "archive_lookups", True):
+            parts.append("no Arctic Shift lookups")
         if args.stop_at_existing:
             parts.append(f"--stop-at-existing {args.stop_at_existing}")
         parts.append(f'--file-scheme "{args.file_scheme}"')
@@ -402,7 +432,7 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
         def do_POST(self):
             if not self._authorised():
                 return
-            if self.path not in ("/jobs", "/known"):
+            if self.path not in ("/jobs", "/known", "/watchlist/gone"):
                 self._send(404, {"error": "Not found"})
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -413,6 +443,8 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
                 payload = json.loads(self.rfile.read(length))
                 if self.path == "/known":
                     self._send(200, server.known_posts(payload))
+                elif self.path == "/watchlist/gone":
+                    self._send(200, server.note_gone(payload))
                 else:
                     self._send(202, server.submit(payload).to_dict())
             except (ValueError, json.JSONDecodeError) as e:

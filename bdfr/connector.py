@@ -140,7 +140,9 @@ class Connector(HashStore):
                 return ArcticShift.needs_lookup(post)
 
             # Given posts go first: they are what was asked for, and may be newer than the archive's listings
-            self.post_list = self.arctic_shift.submissions_from_posts(posts.values(), needs_lookup)
+            self.post_list = self.arctic_shift.submissions_from_posts(
+                posts.values(), needs_lookup, lookups=getattr(self.args, "archive_lookups", True)
+            )
             out.insert(0, self.post_list)
         return out
 

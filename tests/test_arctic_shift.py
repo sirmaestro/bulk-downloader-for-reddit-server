@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -115,6 +116,18 @@ def test_submissions_from_posts_only_looks_up_what_is_needed(arctic_shift: Arcti
 def test_submissions_from_direct_posts_make_no_requests(arctic_shift: ArcticShift):
     assert [s.id for s in arctic_shift.submissions_from_posts([make_post("d", 100)])] == ["d"]
     arctic_shift.session.get.assert_not_called()
+
+
+def test_submissions_from_posts_without_lookups_make_no_requests(arctic_shift: ArcticShift, caplog):
+    caplog.set_level(logging.INFO)
+    gallery = make_post("g", 200, "https://www.reddit.com/gallery/g")
+    posts = [make_post("d", 100), gallery, {"id": "m"}]
+    result = list(arctic_shift.submissions_from_posts(posts, lookups=False))
+    assert [s.id for s in result] == ["g", "d"]  # the gallery as given; "m" has no data to download from
+    arctic_shift.session.get.assert_not_called()
+    assert arctic_shift.looked_up == {}
+    assert "Not looking up 2 of 3 posts (archive lookups off):" in caplog.text
+    assert "Submission m not found in the given data (archive lookups off), skipping" in caplog.text
 
 
 @pytest.mark.parametrize(

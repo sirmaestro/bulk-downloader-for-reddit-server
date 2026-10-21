@@ -145,7 +145,7 @@ SERVE_DEFAULTS = {
     "keep_hashes_db": True,
     "folder_scheme": "",
     "file_scheme": "{POSTID}_{TITLE}",
-    "parallel": 4,
+    "parallel": 8,
     "media_only": True,
 }
 
@@ -189,7 +189,7 @@ def cli_serve(context: click.Context, **_):
     """Runs downloads requested by the Tampermonkey script, each into a folder under DIRECTORY.
 
     Download options given here apply to every request. Unless --no-defaults is given, serve uses --no-dupes
-    --search-existing --keep-hashes-db --folder-scheme '' --file-scheme '{POSTID}_{TITLE}' --parallel 4
+    --search-existing --keep-hashes-db --folder-scheme '' --file-scheme '{POSTID}_{TITLE}' --parallel 8
     --media-only; options
     given here or in --opts override them (in --opts, e.g. no_dupes: false)."""
     port = context.params.pop("port")

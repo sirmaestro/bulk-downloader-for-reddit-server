@@ -79,11 +79,13 @@ class ArcticShift:
             # Posts sharing the oldest timestamp may straddle pages, so overlap by a second and skip ones already seen
             params["before"] = int(min(post["created_utc"] for post in page)) + 1
 
-    def submissions_from_posts(self, posts: Iterable[dict], needs_lookup=None) -> Iterator[Post]:
+    def submissions_from_posts(self, posts: Iterable[dict], needs_lookup=None, lookups: bool = True) -> Iterator[Post]:
         """Yields submissions for posts known only by ID or by partial data, newest first.
 
         Posts are looked up in batches, only when reached, and only if needs_lookup(post) says the data is not enough
-        to download from on its own. needs_lookup returns why a post needs the archive, or None.
+        to download from on its own. needs_lookup returns why a post needs the archive, or None. Without lookups,
+        nothing is requested: such posts are used as given (and fail to download if they can't be), or skipped when
+        they lack the basic fields.
         """
         needs_lookup = needs_lookup or self.needs_lookup
         ordered = sorted(posts, key=lambda post: post.get("created_utc") or 0, reverse=True)
@@ -92,7 +94,11 @@ class ArcticShift:
             reasons = {post["id"]: reason for post in batch if (reason := needs_lookup(post))}
             lookup_ids = list(reasons)
             found = {}
-            if lookup_ids:
+            if lookup_ids and not lookups:
+                self._log_reasons(
+                    f"Not looking up {len(reasons)} of {len(batch)} posts (archive lookups off):", reasons
+                )
+            elif lookup_ids:
                 self._log_lookup(reasons, len(batch))
                 found = {post["id"]: post for post in self._get("posts/ids", {"ids": ",".join(lookup_ids)})}
                 missing = [post_id for post_id in lookup_ids if post_id not in found]
@@ -104,16 +110,21 @@ class ArcticShift:
                 data = found.get(post["id"])
                 if data is None:
                     if not all(post.get(key) for key in ("url", "title", "author", "subreddit", "created_utc")):
-                        logger.warning(f"Submission {post['id']} not found in Arctic Shift, skipping")
+                        where = "in Arctic Shift" if lookups else "in the given data (archive lookups off)"
+                        logger.warning(f"Submission {post['id']} not found {where}, skipping")
                         continue
-                    if post["id"] in lookup_ids:
+                    if post["id"] in lookup_ids and lookups:
                         logger.debug(f"Submission {post['id']} not found in Arctic Shift, using the supplied data")
                     data = post
                 yield self.to_submission(data)
 
     def _log_lookup(self, reasons: dict[str, str], batch_size: int):
         self.looked_up.update(reasons)
-        logger.info(f"Looking up {len(reasons)} of {batch_size} posts in Arctic Shift:")
+        self._log_reasons(f"Looking up {len(reasons)} of {batch_size} posts in Arctic Shift:", reasons)
+
+    @staticmethod
+    def _log_reasons(heading: str, reasons: dict[str, str]):
+        logger.info(heading)
         by_reason = {}
         for post_id, reason in reasons.items():
             by_reason.setdefault(reason, []).append(post_id)

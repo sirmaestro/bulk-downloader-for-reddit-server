@@ -65,16 +65,20 @@ class Youtube(BaseDownloader):
     def get_video_data(url: str) -> dict:
         yt_logger = logging.getLogger("youtube-dl")
         yt_logger.setLevel(logging.CRITICAL)
+        # A profile or playlist link would otherwise have every entry read; it isn't one video, so one is enough
         with yt_dlp.YoutubeDL(
             {
                 "logger": yt_logger,
+                "noplaylist": True,
+                "playlistend": 1,
             }
         ) as ydl:
             try:
                 result = ydl.extract_info(url, download=False)
             except Exception as e:
-                logger.exception(e)
-                raise NotADownloadableLinkError(f"Video info extraction failed for {url}")
+                # The caller logs the failure; yt-dlp's traceback says nothing more than its message
+                message = str(e).removeprefix("ERROR: ")
+                raise NotADownloadableLinkError(f"Video info extraction failed for {url}: {message}")
         return result
 
     @staticmethod

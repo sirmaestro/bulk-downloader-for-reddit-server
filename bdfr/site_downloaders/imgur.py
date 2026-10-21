@@ -6,6 +6,7 @@ import logging
 import re
 import urllib.request
 
+from bdfr import __version__
 from bdfr.configuration import Configuration
 from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
 from bdfr.post import Post
@@ -13,6 +14,9 @@ from bdfr.resource import Resource
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__.replace("site_downloaders", ""))
+
+# Imgur answers every request from python-requests' (and urllib's) default User-Agent with 429 Too Many Requests
+HEADERS = {"User-Agent": f"bdfr/{__version__} (personal archiving)"}
 
 
 class Imgur(BaseDownloader):
@@ -35,7 +39,8 @@ class Imgur(BaseDownloader):
                     logger.debug(f"{e}")
                     out = []
                     if re.search(r".*(.gifv)$", self.post.url):
-                        with urllib.request.urlopen(self.post.url[:-1], timeout=30) as response:
+                        request = urllib.request.Request(self.post.url[:-1], headers=HEADERS)
+                        with urllib.request.urlopen(request, timeout=30) as response:
                             magic = response.read(3)
                         if not self.args.imgur_originals or magic == b"\xff\xd8\xff":
                             logger.debug(f"using {self.post.url[:-4]}mp4")
@@ -43,17 +48,19 @@ class Imgur(BaseDownloader):
                                 Resource(
                                     self.post,
                                     self.post.url[:-4] + "mp4",
-                                    Resource.retry_download(self.post.url[:-4] + "mp4"),
+                                    Resource.retry_download(self.post.url[:-4] + "mp4", HEADERS),
                                 )
                             )
                         else:
                             logger.debug(f"using {self.post.url[:-1]}")
                             out.append(
-                                Resource(self.post, self.post.url[:-1], Resource.retry_download(self.post.url[:-1]))
+                                Resource(
+                                    self.post, self.post.url[:-1], Resource.retry_download(self.post.url[:-1], HEADERS)
+                                )
                             )
                     else:
                         logger.debug(f"using {self.post.url}")
-                        out.append(Resource(self.post, self.post.url, Resource.retry_download(self.post.url)))
+                        out.append(Resource(self.post, self.post.url, Resource.retry_download(self.post.url, HEADERS)))
                     return out
                 raise
 
@@ -61,14 +68,18 @@ class Imgur(BaseDownloader):
         if "is_album" in self.raw_data:
             for image in self.raw_data["images"]:
                 if not self.args.imgur_originals and "mp4" in image:
-                    out.append(Resource(self.post, image["mp4"], Resource.retry_download(image["mp4"])))
+                    out.append(Resource(self.post, image["mp4"], Resource.retry_download(image["mp4"], HEADERS)))
                 else:
-                    out.append(Resource(self.post, image["link"], Resource.retry_download(image["link"])))
+                    out.append(Resource(self.post, image["link"], Resource.retry_download(image["link"], HEADERS)))
         else:
             if not self.args.imgur_originals and "mp4" in self.raw_data:
-                out.append(Resource(self.post, self.raw_data["mp4"], Resource.retry_download(self.raw_data["mp4"])))
+                out.append(
+                    Resource(self.post, self.raw_data["mp4"], Resource.retry_download(self.raw_data["mp4"], HEADERS))
+                )
             else:
-                out.append(Resource(self.post, self.raw_data["link"], Resource.retry_download(self.raw_data["link"])))
+                out.append(
+                    Resource(self.post, self.raw_data["link"], Resource.retry_download(self.raw_data["link"], HEADERS))
+                )
         return out
 
     @staticmethod
@@ -86,6 +97,7 @@ class Imgur(BaseDownloader):
             raise SiteDownloaderError(f"Could not extract Imgur ID from {link}")
 
         headers = {
+            **HEADERS,
             "referer": "https://imgur.com/",
             "origin": "https://imgur.com",
             "content-type": "application/json",

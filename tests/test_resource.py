@@ -4,7 +4,9 @@
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
+from bdfr.exceptions import BulkDownloaderException
 from bdfr.resource import Resource
 
 
@@ -38,3 +40,28 @@ def test_download_online_resource(test_url: str, expected_hash: str):
     test_resource = Resource(MagicMock(), test_url, Resource.retry_download(test_url))
     test_resource.download()
     assert test_resource.hash.hexdigest() == expected_hash
+
+
+def fake_response(url: str, status: int = 200, content: bytes = b"data", redirected: bool = False) -> MagicMock:
+    response = MagicMock()
+    response.url = url
+    response.status_code = status
+    response.content = content
+    response.history = [MagicMock()] if redirected else []
+    return response
+
+
+def test_download_sends_given_headers(monkeypatch: pytest.MonkeyPatch):
+    get = MagicMock(return_value=fake_response("https://i.imgur.com/a.jpg"))
+    monkeypatch.setattr(requests, "get", get)
+    download = Resource.retry_download("https://i.imgur.com/a.jpg", {"User-Agent": "bdfr/test"})
+    assert download({"max_wait_time": 120}) == b"data"
+    assert get.call_args.kwargs["headers"] == {"User-Agent": "bdfr/test"}
+
+
+def test_download_of_removed_placeholder_fails(monkeypatch: pytest.MonkeyPatch):
+    # Imgur redirects deleted images to a placeholder image, which must not be saved as the image
+    get = MagicMock(return_value=fake_response("https://i.imgur.com/removed.png", redirected=True))
+    monkeypatch.setattr(requests, "get", get)
+    with pytest.raises(BulkDownloaderException, match="Removed from the host"):
+        Resource.http_download("https://i.imgur.com/a.jpg", {})

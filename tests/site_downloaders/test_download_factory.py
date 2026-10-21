@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import socket
+
 import pytest
 
 from bdfr.exceptions import NotADownloadableLinkError
@@ -67,12 +69,38 @@ def test_factory_lever_good(test_submission_url: str, expected_class: BaseDownlo
         "https://www.google.com",
         "https://www.google.com/test",
         "https://www.google.com/test/",
+        "https://onlyfans.com/littledaisy",
+        "https://onlyfans.com/claire_cutiee/trial/wcbxnidbkg72ycqllq6szdbgloi6exl2",
+        "https://www.fanvue.com/peonyneko/fv-2",
+        "http://strip.com",
+        "https://page.kakao.com/content/57854767?utm_source=sh_clip",
+    ),
+)
+def test_factory_lever_bad(test_url: str, monkeypatch: pytest.MonkeyPatch):
+    # Links no site downloader or yt-dlp site extractor handles are turned down without a request
+    def no_requests(*args, **kwargs):
+        raise AssertionError("pull_lever made a request")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_requests)
+    with pytest.raises(NotADownloadableLinkError):
+        DownloadFactory.pull_lever(test_url)
+
+
+@pytest.mark.parametrize(
+    "test_url",
+    (
+        "https://www.instagram.com/reel/DWt7yZOgiME/?igsh=NTc4MTIwNjQ2YQ==",
+        "https://streamable.com/dt46y",
         "https://www.tiktok.com/@keriberry.420",
     ),
 )
-def test_factory_lever_bad(test_url: str):
-    with pytest.raises(NotADownloadableLinkError):
-        DownloadFactory.pull_lever(test_url)
+def test_factory_lever_ytdlp_site(test_url: str, monkeypatch: pytest.MonkeyPatch):
+    # Chosen from the URL alone; yt-dlp is given the link as posted (IDs are case-sensitive)
+    def no_requests(*args, **kwargs):
+        raise AssertionError("pull_lever made a request")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_requests)
+    assert DownloadFactory.pull_lever(test_url) is YtdlpFallback
 
 
 @pytest.mark.parametrize(

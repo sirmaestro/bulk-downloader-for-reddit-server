@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 from unittest.mock import Mock
 
 import pytest
+import requests
 
 from bdfr.configuration import Configuration
 from bdfr.resource import Resource
@@ -62,3 +64,29 @@ def test_find_resources(test_url: str, expected_hashes: list[str]):
     [res.download() for res in results]
     hashes = set([res.hash.hexdigest() for res in results])
     assert hashes == set(expected_hashes)
+
+
+@pytest.mark.parametrize(
+    ("test_url", "api_data"),
+    (
+        ("https://i.imgur.com/4aLOj0L.jpg", None),
+        ("https://imgur.com/4aLOj0L", {"link": "https://i.imgur.com/4aLOj0L.jpg"}),
+        ("https://imgur.com/a/xWZsDDP", {"is_album": True, "images": [{"link": "https://i.imgur.com/ypa8YfS.png"}]}),
+    ),
+)
+def test_requests_send_user_agent(test_url: str, api_data: dict, monkeypatch: pytest.MonkeyPatch):
+    # Imgur answers python-requests' default User-Agent with 429 Too Many Requests
+    def retrieve_url(url, cookies=None, headers=None):
+        assert headers["User-Agent"].startswith("bdfr/")
+        return Mock(text=json.dumps({"data": api_data}))
+
+    get = Mock(return_value=Mock(url="", history=[], status_code=200, content=b"image"))
+    monkeypatch.setattr(Imgur, "retrieve_url", staticmethod(retrieve_url))
+    monkeypatch.setattr(requests, "get", get)
+    mock_submission = Mock()
+    mock_submission.url = test_url
+    config = Configuration()
+    config.imgur_originals = True
+    for res in Imgur(mock_submission, config).find_resources():
+        res.download()
+    assert get.call_args.kwargs["headers"]["User-Agent"].startswith("bdfr/")

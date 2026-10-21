@@ -17,6 +17,9 @@ from bdfr.post import Post
 
 logger = logging.getLogger(__name__)
 
+# Placeholder images that hosts redirect deleted media to; they must not be saved as the media
+REMOVED_PLACEHOLDERS = frozenset({"https://i.imgur.com/removed.png"})
+
 
 class Resource:
     def __init__(self, source_submission: Post, url: str, download_function: Callable, extension: str = None):
@@ -30,7 +33,9 @@ class Resource:
             self.extension = self._determine_extension()
 
     @staticmethod
-    def retry_download(url: str) -> Callable:
+    def retry_download(url: str, headers: Optional[dict] = None) -> Callable:
+        if headers:
+            return lambda global_params: Resource.http_download(url, {**global_params, "headers": headers})
         return lambda global_params: Resource.http_download(url, global_params)
 
     def download(self, download_parameters: Optional[dict] = None):
@@ -70,6 +75,8 @@ class Resource:
         while True:
             try:
                 response = requests.get(url, headers=headers, timeout=120)
+                if response.history and response.url in REMOVED_PLACEHOLDERS:
+                    raise BulkDownloaderException(f"Removed from the host (redirected to {response.url})")
                 if re.match(r"^2\d{2}", str(response.status_code)) and response.content:
                     return response.content
                 elif response.status_code in (408, 429):

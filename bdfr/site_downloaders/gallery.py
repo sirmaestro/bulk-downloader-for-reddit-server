@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+from typing import Optional
 
 import requests
 
@@ -31,10 +32,10 @@ class Gallery(BaseDownloader):
 
     def find_resources(self) -> list[Resource]:
         try:
-            image_urls = self._get_links(self.post.gallery_data["items"])
+            items = self.post.gallery_data["items"]
         except (AttributeError, TypeError):
             try:
-                image_urls = self._get_links(self.post.crosspost_parent_list[0]["gallery_data"]["items"])
+                items = self.post.crosspost_parent_list[0]["gallery_data"]["items"]
             except (AttributeError, IndexError, TypeError, KeyError):
                 # Reddit drops the image list of removed posts
                 removed = getattr(self.post, "removed_by_category", None)
@@ -43,7 +44,10 @@ class Gallery(BaseDownloader):
                 logger.debug(f"Could not find gallery data in submission {self.post.id}")
                 raise SiteDownloaderError("No images found in Reddit gallery")
 
+        image_urls = self._get_links(items)
         if not image_urls:
+            if items:
+                raise SiteDownloaderError(f"None of the {len(items)} gallery images are on i.redd.it any more")
             raise SiteDownloaderError("No images found in Reddit gallery")
         return [Resource(self.post, url, Resource.retry_download(url)) for url in image_urls]
 
@@ -51,12 +55,18 @@ class Gallery(BaseDownloader):
     def _get_links(id_dict: list[dict]) -> list[str]:
         out = []
         for item in id_dict:
-            image_id = item["media_id"]
-            possible_extensions = (".jpg", ".png", ".gif", ".gifv", ".jpeg")
-            for extension in possible_extensions:
-                test_url = f"https://i.redd.it/{image_id}{extension}"
-                response = requests.head(test_url, timeout=30)
-                if response.status_code == 200:
-                    out.append(test_url)
-                    break
+            url = Gallery.find_image(item["media_id"])
+            if url:
+                out.append(url)
         return out
+
+    @staticmethod
+    def find_image(image_id: str) -> Optional[str]:
+        """The i.redd.it URL of an image ID, found by trying extensions in turn"""
+        possible_extensions = (".jpg", ".png", ".gif", ".gifv", ".jpeg")
+        for extension in possible_extensions:
+            test_url = f"https://i.redd.it/{image_id}{extension}"
+            response = requests.head(test_url, timeout=30)
+            if response.status_code == 200:
+                return test_url
+        return None

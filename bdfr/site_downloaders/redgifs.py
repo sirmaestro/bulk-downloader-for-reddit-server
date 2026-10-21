@@ -93,12 +93,13 @@ class Redgifs(BaseDownloader):
         out = set()
         try:
             if response_json["gif"]["type"] == 1:  # type 1 is a video
-                hd_url = response_json["gif"]["urls"]["hd"]
+                # Some videos only have an SD version, without an "hd" key
                 sd_url = response_json["gif"]["urls"]["sd"]
+                hd_url = response_json["gif"]["urls"].get("hd") or sd_url
                 try:
                     if Redgifs._url_is_accessible(hd_url, headers, Redgifs.REQUEST_TIMEOUT):
                         out.add(hd_url)
-                    elif Redgifs._url_is_accessible(sd_url, headers, Redgifs.REQUEST_TIMEOUT):
+                    elif hd_url != sd_url and Redgifs._url_is_accessible(sd_url, headers, Redgifs.REQUEST_TIMEOUT):
                         out.add(sd_url)
                     else:
                         raise SiteDownloaderError(
@@ -114,11 +115,12 @@ class Redgifs(BaseDownloader):
                     response_json = json.loads(content.text)
                     out = {p["urls"]["hd"] for p in response_json["gifs"]}
                 else:
-                    out.add(response_json["gif"]["urls"]["hd"])
+                    urls = response_json["gif"]["urls"]
+                    out.add(urls.get("hd") or urls["sd"])
             else:
                 raise KeyError
-        except (KeyError, AttributeError):
-            raise SiteDownloaderError("Failed to find JSON data in page")
+        except (KeyError, AttributeError, TypeError):
+            raise SiteDownloaderError(f"Failed to find JSON data in page: {content.text[:200]}")
 
         # Update subdomain if old one is returned
         out = {re.sub("thumbs2", "thumbs3", link) for link in out}

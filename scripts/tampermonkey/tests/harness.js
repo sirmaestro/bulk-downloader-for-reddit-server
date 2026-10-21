@@ -43,6 +43,9 @@ class Harness {
                 return stored === null ? fallback : JSON.parse(stored);
             };
             window.GM_setValue = (key, value) => localStorage.setItem(`gm:${key}`, JSON.stringify(value));
+            // Tampermonkey's menu: tests run a command with page.evaluate(() => __gmMenu["..."]())
+            window.__gmMenu = {};
+            window.GM_registerMenuCommand = (name, onClick) => (window.__gmMenu[name] = onClick);
             window.GM_info = { scriptHandler: "Playwright", version: "test", script: { version: "test" } };
             window.GM_xmlhttpRequest = (details) => {
                 const { onload, onerror, ontimeout, ...plain } = details;
@@ -71,7 +74,8 @@ class Harness {
 
     // A route answers requests whose method matches and whose URL starts with `url` (or matches it, for a RegExp).
     // Later routes win, so tests override the defaults. reply: { status, json | body, finalUrl } or
-    // { network: "error" | "timeout" }, or a function of the request returning one. `times` limits how often.
+    // { network: "error" | "timeout" }, or a function of the request returning one; `headers` adds response headers.
+    // `times` limits how often.
     on(method, url, reply, { times } = {}) {
         this.routes.unshift({ method, url, reply, times });
         return this;
@@ -87,6 +91,7 @@ class Harness {
         this.serve("POST", "/jobs", (request) => ({ status: 202, json: { id: "job1", state: "queued", ...counts(), total: (request.data.posts || []).length } }));
         this.serve("GET", "/jobs/job1", { json: { id: "job1", state: "done", ...counts(), results: {} } });
         this.serve("GET", "/watchlist", { json: { enabled: true, users: [] } });
+        this.serve("POST", "/watchlist/gone", (request) => ({ json: request.data }));
         return this;
     }
 
@@ -114,7 +119,8 @@ class Harness {
                     status,
                     statusText: String(status),
                     finalUrl: reply.finalUrl || request.url,
-                    responseHeaders: reply.json !== undefined ? "content-type: application/json" : "content-type: text/html",
+                    responseHeaders: [reply.json !== undefined ? "content-type: application/json" : "content-type: text/html",
+                        ...Object.entries(reply.headers || {}).map(([name, value]) => `${name}: ${value}`)].join("\r\n"),
                     responseText: reply.json !== undefined ? JSON.stringify(reply.json) : reply.body || "",
                 },
             };

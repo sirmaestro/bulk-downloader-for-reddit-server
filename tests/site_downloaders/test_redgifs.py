@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import re
 from unittest.mock import Mock
 
@@ -123,3 +124,22 @@ def test_hd_soft_fail(test_url: str, expected_link: set[str], expected_hash: set
     [res.download() for res in results]
     hashes = set([res.hash.hexdigest() for res in results])
     assert hashes == set(expected_hash)
+
+
+@pytest.mark.parametrize(
+    ("urls", "expected"),
+    (
+        # Some videos only have an SD version, without an "hd" key
+        ({"sd": "https://media.redgifs.com/A-mobile.mp4"}, {"https://media.redgifs.com/A-mobile.mp4"}),
+        (
+            {"sd": "https://media.redgifs.com/A-mobile.mp4", "hd": "https://media.redgifs.com/A.mp4"},
+            {"https://media.redgifs.com/A.mp4"},
+        ),
+    ),
+)
+def test_get_link_without_hd(urls: dict, expected: set[str], monkeypatch: pytest.MonkeyPatch):
+    gif = {"gif": {"type": 1, "urls": urls}}
+    monkeypatch.setattr(Redgifs, "_get_token", classmethod(lambda cls, renew=False: "token"))
+    monkeypatch.setattr(Redgifs, "retrieve_url", staticmethod(lambda url, headers=None: Mock(text=json.dumps(gif))))
+    monkeypatch.setattr(Redgifs, "_url_is_accessible", staticmethod(lambda url, headers, timeout: True))
+    assert Redgifs._get_link("https://www.redgifs.com/watch/lumberinghomelynurseshark") == expected

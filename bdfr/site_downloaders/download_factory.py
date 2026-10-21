@@ -55,7 +55,7 @@ class DownloadFactory:
             return PornHub
         elif re.match(r"vidble\.com", sanitised_url):
             return Vidble
-        elif YtdlpFallback.can_handle_link(sanitised_url):
+        elif YtdlpFallback.can_handle_link(url.strip()):
             return YtdlpFallback
         else:
             raise NotADownloadableLinkError(f"No downloader module exists for url {url}")

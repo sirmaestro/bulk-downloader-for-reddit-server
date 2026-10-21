@@ -100,6 +100,7 @@ def make_downloader(tmp_path: Path, posts: list[dict]) -> Downloader:
     downloader.master_hash_list, downloader.master_file_list, downloader.master_url_list = {}, {}, {}
     downloader._hash_db = None
     downloader.progress_callback = None
+    downloader.newest_post = None
     client = ArcticShift()
     downloader.arctic_shift = client
     downloader.listings = [iter([client.to_submission(data) for data in posts])]

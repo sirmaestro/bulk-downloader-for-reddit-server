@@ -54,6 +54,9 @@ class Configuration(Namespace):
         self.host: Optional[str] = None
         self.rename_existing: bool = False
         self.post_json: list[str] = []
+        # serve only (no option): given posts may be looked up in Arctic Shift when their data isn't enough to
+        # download from (e.g. galleries Reddit no longer lists the images of); off for folders without archive checks
+        self.archive_lookups: bool = True
         self.skip: list[str] = []
         self.skip_domain: list[str] = []
         self.skip_subreddit: list[str] = []
