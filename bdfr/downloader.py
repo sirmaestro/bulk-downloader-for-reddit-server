@@ -65,6 +65,8 @@ class RedditDownloader(RedditConnector):
         # Called with (submission ID, result of _download_submission, label from result_label) after each
         # submission, in listing order; used by `bdfr serve`
         self.progress_callback: Optional[Callable[[str, Optional[bool], str], None]] = None
+        # Why listings were stopped before their end in download(); the run didn't see everything it was asked to
+        self.errors: list[str] = []
         if (
             self.args.stop_at_existing
             and self.sort_filter is not RedditTypes.SortType.NEW
@@ -146,10 +148,12 @@ class RedditDownloader(RedditConnector):
                             break
                 except (prawcore.PrawcoreException, praw.exceptions.PRAWException) as e:
                     logger.error(f"The submission after {last_id} failed to download due to a PRAW exception: {e}")
+                    self.errors.append(f"Reddit: {e}")
                     logger.debug("Waiting 60 seconds to continue")
                     sleep(60)
                 except errors.ArcticShiftError as e:
                     logger.error(f"Stopped reading a listing: {e}")
+                    self.errors.append(str(e))
                 finally:
                     # Submissions already started are finished and reported; once the listing is stopped, ones not
                     # started yet are dropped
@@ -162,6 +166,7 @@ class RedditDownloader(RedditConnector):
         except Exception as e:
             logger.error(f"Uncaught exception: {e}")
             logger.exception(e)
+            self.errors.append(f"Uncaught exception: {e}")
         finally:
             if pool:
                 pool.shutdown(wait=True, cancel_futures=True)

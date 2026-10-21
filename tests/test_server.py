@@ -27,6 +27,7 @@ class FakeDownloader:
     def __init__(self, args: Configuration):
         self.args = args
         self.progress_callback = None
+        self.errors = []
 
     def download(self):
         post_ids = []

@@ -262,7 +262,12 @@ class DownloadServer:
             logger.debug(f"Job {job.id}: {self._describe(job)}; {self._options(args)}")
             downloader.progress_callback = job.record
             downloader.download()
-            job.state = "done"
+            if downloader.errors:
+                # A listing stopped part way (e.g. Arctic Shift unavailable) must not look like nothing new
+                job.state = "failed"
+                job.error = "; ".join(downloader.errors)
+            else:
+                job.state = "done"
         except Exception as e:
             logger.exception(f"Job {job.id} failed")
             job.state = "failed"

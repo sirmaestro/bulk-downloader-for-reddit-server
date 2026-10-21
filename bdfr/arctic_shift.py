@@ -184,16 +184,25 @@ class ArcticShift:
             try:
                 payload = response.json()
             except ValueError:
-                payload = {}
-            message = payload.get("error") if isinstance(payload, dict) else None
-            if response.status_code == 200 and not message:
+                payload = None
+            # An answer without "data" or "error" (e.g. a proxy's HTML error page) is not an empty result
+            valid = isinstance(payload, dict) and ("data" in payload or "error" in payload)
+            message = payload.get("error") if valid else None
+            if response.status_code == 200 and valid and not message:
                 data = payload.get("data") or []
                 logger.info(f"{described} -> {len(data)} posts in {elapsed:.1f}s")
                 return data
+            if response.status_code == 200 and not valid:
+                message = "the answer was not Arctic Shift's JSON"
             logger.info(f"{described} -> HTTP {response.status_code}{f' ({message})' if message else ''}")
             error = (message or f"HTTP {response.status_code}", response)
             # The server reports overload as an error message such as "Timeout. Maybe slow down a bit"
-            if response.status_code not in (429, 500, 502, 503, 504) and "timeout" not in str(message).lower():
+            retryable = (
+                response.status_code in (429, 500, 502, 503, 504)
+                or "timeout" in str(message).lower()
+                or (response.status_code == 200 and not valid)
+            )
+            if not retryable:
                 raise ArcticShiftError(f"Arctic Shift rejected the request: {error[0]}")
         raise ArcticShiftError(f"Arctic Shift request failed after {self.MAX_RETRIES + 1} attempts: {error[0]}")
 
