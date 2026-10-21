@@ -1,0 +1,35 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": null,
+    "dist": 1,
+    "before": null,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "gal0001",
+          "name": "t3_gal0001",
+          "title": "A gallery",
+          "author": "someone",
+          "subreddit": "pics",
+          "created_utc": 1792400000,
+          "url": "https://www.reddit.com/gallery/gal0001",
+          "domain": "reddit.com",
+          "permalink": "/r/pics/comments/gal0001/a_gallery/",
+          "is_self": false,
+          "is_gallery": true,
+          "over_18": true,
+          "score": 80,
+          "upvote_ratio": 0.97,
+          "link_flair_text": "OC",
+          "gallery_data": {"items": [{"media_id": "m1aaaaaaaaaa", "id": 1}, {"media_id": "m2aaaaaaaaaa", "id": 2}]},
+          "media_metadata": {
+            "m1aaaaaaaaaa": {"status": "valid", "e": "Image", "m": "image/jpg", "p": [{"y": 108, "x": 108, "u": "https://preview.redd.it/m1aaaaaaaaaa.jpg?width=108"}], "s": {"y": 1080, "x": 1080, "u": "https://preview.redd.it/m1aaaaaaaaaa.jpg"}, "id": "m1aaaaaaaaaa"},
+            "m2aaaaaaaaaa": {"status": "valid", "e": "Image", "m": "image/png", "p": [], "s": {"y": 720, "x": 720, "u": "https://preview.redd.it/m2aaaaaaaaaa.png"}, "id": "m2aaaaaaaaaa"}
+          }
+        }
+      }
+    ]
+  }
+}

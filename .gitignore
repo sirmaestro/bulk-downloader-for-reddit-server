@@ -142,3 +142,8 @@ test_config.cfg
 
 .vscode/
 .idea/
+
+# Userscript tests (scripts/tampermonkey)
+node_modules/
+test-results/
+playwright-report/

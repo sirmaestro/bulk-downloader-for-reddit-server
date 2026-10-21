@@ -1,0 +1,11 @@
+{
+  "name": "bdfr-userscript-tests",
+  "private": true,
+  "description": "Playwright tests for bdfr-export.user.js against saved Reddit and bdfr serve responses",
+  "scripts": {
+    "test": "node --check bdfr-export.user.js && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
+  }
+}

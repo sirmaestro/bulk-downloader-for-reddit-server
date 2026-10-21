@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.1
+// @version      4.2
 // @description  Downloads the posts on old.reddit pages through a local `bdfr serve`, or collects them as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @grant        GM_getValue
@@ -350,8 +350,21 @@
 
     // --- Talking to `bdfr serve` ---
 
+    // Every failure is also logged to the browser console (as a warning starting "BDFR:"), so it's never only a
+    // passing status line. The error's message is what describeError shows.
     function request(method, path, body) {
         return new Promise((resolve, reject) => {
+            const fail = (message, detail, response) => {
+                response = response || {};
+                console.warn(`BDFR: ${method} ${path} to bdfr serve failed: ${detail}`, {
+                    server: GM_getValue(SERVER_KEY, DEFAULT_SERVER),
+                    status: response.status,
+                    finalUrl: response.finalUrl,
+                    error: response.error,
+                    responseStart: (response.responseText || "").slice(0, 300),
+                });
+                reject(new Error(message));
+            };
             GM_xmlhttpRequest({
                 method,
                 url: GM_getValue(SERVER_KEY, DEFAULT_SERVER) + path,
@@ -359,18 +372,26 @@
                 data: body ? JSON.stringify(body) : undefined,
                 timeout: 30000,
                 onload: (response) => {
-                    let data = {};
+                    let data = null;
                     try {
                         data = JSON.parse(response.responseText);
                     } catch (e) {
-                        // leave data empty
+                        // checked below
                     }
-                    if (response.status === 401) reject(new Error("unauthorised"));
-                    else if (response.status >= 400) reject(new Error(data.error || `HTTP ${response.status}`));
-                    else resolve(data);
+                    if (response.status === 401) return fail("unauthorised", "HTTP 401 (wrong token)", response);
+                    if (response.status >= 400) {
+                        const message = (data && data.error) || `HTTP ${response.status}`;
+                        return fail(message, `HTTP ${response.status}: ${message}`, response);
+                    }
+                    // Something else answering on the address (a router page, a proxy) must not pass for bdfr serve
+                    if (!data || typeof data !== "object") {
+                        return fail("bdfr serve's answer was not JSON", "the answer was not JSON", response);
+                    }
+                    resolve(data);
                 },
-                onerror: () => reject(new Error("unreachable")),
-                ontimeout: () => reject(new Error("unreachable")),
+                onerror: (response) => fail("unreachable", "it couldn't be reached"
+                    + (response && response.error ? ` (${response.error})` : ""), response),
+                ontimeout: (response) => fail("unreachable", "it didn't answer in time", response),
             });
         });
     }
@@ -504,6 +525,10 @@
                 + (job.error ? ` · ${job.error}` : "") + (galleryNote ? ` · ${galleryNote}` : ""));
             Object.assign(state, job.results);
             applyMarks();
+            if (job.state === "failed") {
+                console.warn(`BDFR: job ${jobId} failed: ${job.error || "no reason given"} (details in serve_log.txt)`,
+                    job.counts);
+            }
             if (job.state === "done" || job.state === "failed") clearInterval(polling);
         };
         poll();

@@ -37,3 +37,20 @@ jobs:
     - name: Test with pytest
       run: |
         pytest -m "not online and not reddit and not authenticated and not slow" --ignore=tests/integration_tests
+
+  userscript:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scripts/tampermonkey
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+    # Saved Reddit and bdfr serve responses only; the tests make no network requests
+    - name: Test the userscript with Playwright
+      run: |
+        npm ci
+        npx playwright install --with-deps chromium
+        npm test
