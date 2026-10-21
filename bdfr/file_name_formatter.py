@@ -11,6 +11,7 @@ from typing import Optional
 
 import emoji
 
+from bdfr import logs
 from bdfr.exceptions import BulkDownloaderException
 from bdfr.post import Post
 from bdfr.resource import Resource
@@ -182,7 +183,7 @@ class FileNameFormatter:
                 logger.exception("Could not generate file path")
         else:
             for i, res in enumerate(resources, start=1):
-                logger.log(9, f"Formatting filename with index {i}")
+                logger.log(logs.TRACE, f"Formatting filename with index {i}")
                 try:
                     out.append((self.format_path(res, destination_directory, i), res))
                 except BulkDownloaderException as e:

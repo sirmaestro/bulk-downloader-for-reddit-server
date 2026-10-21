@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 
 import logging
-import sys
 from pathlib import Path
 
 import click
 
-from bdfr import __version__
+from bdfr import __version__, logs
 from bdfr.configuration import Configuration
 from bdfr.downloader import Downloader
 from bdfr.renamer import Renamer, rename_directory
@@ -260,26 +259,8 @@ def cli_rename(
     logger.info(summary)
 
 
-def make_console_logging_handler(verbosity: int) -> logging.StreamHandler:
-    class StreamExceptionFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            result = not (record.levelno == logging.ERROR and record.exc_info)
-            return result
-
-    logger.setLevel(1)
-    stream = logging.StreamHandler(sys.stdout)
-    stream.addFilter(StreamExceptionFilter())
-
-    formatter = logging.Formatter("[%(asctime)s - %(name)s - %(levelname)s] - %(message)s")
-    stream.setFormatter(formatter)
-
-    if verbosity <= 0:
-        stream.setLevel(logging.INFO)
-    elif verbosity == 1:
-        stream.setLevel(logging.DEBUG)
-    else:
-        stream.setLevel(9)
-    return stream
+def make_console_logging_handler(verbosity: int) -> logging.Handler:
+    return logs.console_handler(verbosity)
 
 
 def silence_module_loggers():

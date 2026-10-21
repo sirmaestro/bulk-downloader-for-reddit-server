@@ -4,6 +4,7 @@
 import logging
 import re
 
+from bdfr import logs
 from bdfr.resource import Resource
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class DownloadFilter:
         combined_extensions = "|".join(self.excluded_extensions)
         pattern = re.compile(r".*({})$".format(combined_extensions))
         if re.match(pattern, resource_extension):
-            logger.log(9, f'Url "{resource_extension}" matched with "{pattern}"')
+            logger.log(logs.TRACE, f'Url "{resource_extension}" matched with "{pattern}"')
             return False
         else:
             return True
@@ -47,7 +48,7 @@ class DownloadFilter:
         combined_domains = "|".join(self.excluded_domains)
         pattern = re.compile(r"https?://.*({}).*".format(combined_domains))
         if re.match(pattern, url):
-            logger.log(9, f'Url "{url}" matched with "{pattern}"')
+            logger.log(logs.TRACE, f'Url "{url}" matched with "{pattern}"')
             return False
         else:
             return True

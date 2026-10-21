@@ -16,6 +16,7 @@ from typing import Optional
 import platformdirs
 
 from bdfr import exceptions as errors
+from bdfr import logs
 from bdfr.arctic_shift import ArcticShift, read_post_json, submission_id_from_link
 from bdfr.configuration import Configuration
 from bdfr.download_filter import DownloadFilter
@@ -32,14 +33,16 @@ class Connector(HashStore):
     """Loads the configuration, sets up logging and the download folder's hash store, and builds `self.listings`: lazy
     generators of posts, one per source (given posts first, then each subreddit and user listing)"""
 
-    def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = ()):
+    def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = (), log_file: bool = True):
+        """log_file: write the run to its own log file (log_output.txt or --log); `bdfr serve` jobs don't, since the
+        server logs everything to serve_log.txt"""
         self.args = args
         self.config_directories = platformdirs.PlatformDirs("bdfr", "BDFR")
         self.determine_directories()
         self.load_config()
         self.read_config()
-        file_log = self.create_file_logger()
-        self._apply_logging_handlers(itertools.chain(logging_handlers, [file_log]))
+        file_logs = [self.create_file_logger()] if log_file else []
+        self._apply_logging_handlers(itertools.chain(logging_handlers, file_logs))
         self.run_time = datetime.now().isoformat()
         self._setup_internal_objects()
 
@@ -50,9 +53,7 @@ class Connector(HashStore):
         self.parse_disabled_modules()
 
         self.download_filter = self.create_download_filter()
-        logger.log(9, "Created download filter")
         self.file_name_formatter = self.create_file_name_formatter()
-        logger.log(9, "Create file name formatter")
 
         self.arctic_shift = ArcticShift()
         self.args.user = [user for user in self.args.user if user]
@@ -80,12 +81,12 @@ class Connector(HashStore):
         """Read any cfg values that need to be processed"""
         if self.args.max_wait_time is None:
             self.args.max_wait_time = self.cfg_parser.getint("DEFAULT", "max_wait_time", fallback=120)
-            logger.debug(f"Setting maximum download wait time to {self.args.max_wait_time} seconds")
+            logger.log(logs.TRACE, f"Maximum download wait time: {self.args.max_wait_time} seconds")
         if self.args.time_format is None:
             option = self.cfg_parser.get("DEFAULT", "time_format", fallback="ISO")
             if re.match(r"^[\s\'\"]*$", option):
                 option = "ISO"
-            logger.debug(f"Setting datetime format string to {option}")
+            logger.log(logs.TRACE, f"Time format: {option}")
             self.args.time_format = option
         if not self.args.disable_module:
             self.args.disable_module = [self.cfg_parser.get("DEFAULT", "disabled_modules", fallback="")]
@@ -93,15 +94,15 @@ class Connector(HashStore):
             self.args.filename_restriction_scheme = self.cfg_parser.get(
                 "DEFAULT", "filename_restriction_scheme", fallback=None
             )
-            logger.debug(f"Setting filename restriction scheme to '{self.args.filename_restriction_scheme}'")
+            logger.log(logs.TRACE, f"File name restriction scheme: {self.args.filename_restriction_scheme}")
 
     def parse_disabled_modules(self):
         disabled_modules = self.args.disable_module
         disabled_modules = self.split_args_input(disabled_modules)
-        disabled_modules = {name.strip().lower() for name in disabled_modules}
+        disabled_modules = {name.strip().lower() for name in disabled_modules if name.strip()}
         self.args.disable_module = disabled_modules
         if self.args.disable_module:
-            logger.debug(f'Disabling the following modules: {", ".join(self.args.disable_module)}')
+            logger.debug(f'Disabled modules: {", ".join(sorted(self.args.disable_module))}')
 
     def build_listings(self) -> list[Iterator]:
         after = None
@@ -110,14 +111,14 @@ class Connector(HashStore):
 
         out = []
         for subreddit in self.split_args_input(self.args.subreddit):
-            logger.debug(f"Added submissions from subreddit {subreddit} via Arctic Shift")
+            logger.debug(f"Listing r/{subreddit} from Arctic Shift")
             out.append(self.arctic_shift.submissions(subreddit=subreddit, limit=self.args.limit, after=after))
         if self.args.submitted:
             if not self.args.user:
                 logger.warning("At least one user must be supplied to download user data")
             user_after = max(filter(None, (after, getattr(self.args, "listing_after", None))), default=None)
             for user in self.args.user:
-                logger.debug(f"Retrieving submitted posts of user {user} via Arctic Shift")
+                logger.debug(f"Listing u/{user}'s posts from Arctic Shift")
                 out.append(
                     self.arctic_shift.submissions(
                         author=user, limit=self.args.limit, after=user_after, before=self.args.listing_before
@@ -129,7 +130,7 @@ class Connector(HashStore):
             if submission_id := submission_id_from_link(link):
                 posts.setdefault(submission_id, {"id": submission_id})
             else:
-                logger.error(f"Could not find a submission ID in {link}")
+                logger.error(f"No post ID in {link}")
         if posts:
             filter_on_ratio = self.args.min_score_ratio or self.args.max_score_ratio
 
@@ -171,7 +172,7 @@ class Connector(HashStore):
         for path in possible_paths:
             if path.resolve().expanduser().exists():
                 self.config_location = path
-                logger.debug(f"Loading configuration from {path}")
+                logger.log(logs.TRACE, f"Configuration: {path}")
                 break
         if not self.config_location:
             # Use a copy in the user's config directory so the packaged file is never written to
@@ -182,6 +183,7 @@ class Connector(HashStore):
         self.cfg_parser.read(self.config_location)
 
     def create_file_logger(self) -> logging.handlers.RotatingFileHandler:
+        """The run's log file, started afresh each run (the previous ones are kept as .1, .2, ...)"""
         if self.args.log is None:
             log_path = Path(self.config_directory, "log_output.txt")
         else:
@@ -189,11 +191,10 @@ class Connector(HashStore):
             if not log_path.parent.exists():
                 raise errors.BulkDownloaderException("Designated location for logfile does not exist")
         backup_count = self.cfg_parser.getint("DEFAULT", "backup_log_count", fallback=3)
-        rotate_bytes = getattr(self.args, "log_rotate_bytes", 0) or 0
         file_handler = logging.handlers.RotatingFileHandler(
-            log_path, mode="a", maxBytes=rotate_bytes, backupCount=backup_count, encoding="utf-8"
+            log_path, mode="a", backupCount=backup_count, encoding="utf-8"
         )
-        if log_path.exists() and not rotate_bytes:
+        if log_path.exists():
             try:
                 file_handler.doRollover()
             except PermissionError:
@@ -202,12 +203,7 @@ class Connector(HashStore):
                     "BDFR process or specify alternate logfile location"
                 )
                 raise
-        formatter = logging.Formatter("[%(asctime)s - %(name)s - %(levelname)s] - %(message)s")
-        file_handler.setFormatter(formatter)
-        # The file always gets debug lines; the finer level 9 tracing (filters, file name indexes, request URLs)
-        # only with -vv, as on the console
-        file_handler.setLevel(0 if (self.args.verbose or 0) >= 2 else logging.DEBUG)
-        return file_handler
+        return logs.prepare(file_handler, logs.file_level(self.args.verbose or 0))
 
     @staticmethod
     def sanitise_subreddit_name(subreddit: str) -> str:

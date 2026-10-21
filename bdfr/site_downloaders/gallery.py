@@ -41,7 +41,7 @@ class Gallery(BaseDownloader):
                 removed = getattr(self.post, "removed_by_category", None)
                 if removed:
                     raise SiteDownloaderError(REMOVED.get(removed, f"removed ({removed.replace('_', ' ')})"))
-                logger.debug(f"Could not find gallery data in submission {self.post.id}")
+                logger.debug("No gallery data in the post")
                 raise SiteDownloaderError("No images found in Reddit gallery")
 
         image_urls = self._get_links(items)

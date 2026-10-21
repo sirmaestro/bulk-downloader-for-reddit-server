@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import contextlib
+import io
 import logging
 import time
 from collections import Counter
@@ -9,10 +11,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from bdfr import logs
 from bdfr.arctic_shift import ArcticShift
 from bdfr.configuration import Configuration
 from bdfr.download_filter import DownloadFilter
 from bdfr.downloader import Downloader
+from bdfr.exceptions import SiteDownloaderError
 from bdfr.file_name_formatter import FileNameFormatter
 from bdfr.resource import Resource
 
@@ -84,7 +88,26 @@ class FakeDownloader:
 
     def find_resources(self) -> list[Resource]:
         url = self.submission.url
-        return [Resource(self.submission, url, lambda _params: CONTENT[url], ".jpg")]
+        return [Resource(self.submission, url, lambda _params: CONTENT.get(url, url.encode()), ".jpg")]
+
+
+@contextlib.contextmanager
+def context_lines(level: int = logging.INFO):
+    """The downloader's lines at `level` and up as the log files show them after the level: context, then message"""
+    stream = io.StringIO()
+    handler = logs.prepare(logging.StreamHandler(stream), level)
+    handler.setFormatter(logging.Formatter("%(context)s%(message)s"))
+    downloader_logger = logging.getLogger("bdfr.downloader")
+    saved = downloader_logger.level
+    downloader_logger.setLevel(level)
+    downloader_logger.addHandler(handler)
+    lines = []
+    try:
+        yield lines
+    finally:
+        downloader_logger.removeHandler(handler)
+        downloader_logger.setLevel(saved)
+        lines.extend(stream.getvalue().splitlines())
 
 
 def make_downloader(tmp_path: Path, posts: list[dict]) -> Downloader:
@@ -114,22 +137,49 @@ def test_one_line_per_post(tmp_path: Path, caplog: pytest.LogCaptureFixture):
         post("ccc3333", "https://i.redd.it/c.jpg", score=1),
     ]
     with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=FakeDownloader):
-        with caplog.at_level(logging.INFO, logger="bdfr.downloader"):
+        with context_lines() as lines:
             make_downloader(tmp_path, posts).download()
-        lines = [r.getMessage() for r in caplog.records if r.name == "bdfr.downloader" and r.levelno == logging.INFO]
         assert lines == [
-            "#1 aaa1111 in r/test [FakeDownloader]: new - 1 file written",
-            "#2 bbb2222 in r/test [FakeDownloader]: skipped - 1 same as already downloaded aaa1111_title aaa1111.jpg",
-            "#3 ccc3333 in r/test: skipped - score 1 is below --min-score 5",
-            "Finished 3 posts: 1 new (1 files written), 0 already downloaded, 2 skipped",
+            "post aaa1111: new - 1 file written (#1, r/test, FakeDownloader)",
+            "post bbb2222: duplicate - 1 same as already downloaded aaa1111_title aaa1111.jpg "
+            "(#2, r/test, FakeDownloader)",
+            "post ccc3333: skipped - score 1 is below --min-score 5 (#3, r/test)",
+            "Finished 3 posts: 1 new, 0 already downloaded, 1 duplicate, 1 skipped, 0 failed; 1 file written",
             "Made no requests to Arctic Shift",
         ]
 
-        caplog.clear()
-        with caplog.at_level(logging.INFO, logger="bdfr.downloader"):
+        with context_lines() as lines:
             make_downloader(tmp_path, posts[:1]).download()
     # Known from its ID in the folder's file names, before anything is requested
-    assert "#1 aaa1111 in r/test: already downloaded - files with its ID already in the folder" in caplog.text
+    assert "post aaa1111: already downloaded - files with its ID already in the folder (#1, r/test)" in lines
+
+
+class FailingDownloader(FakeDownloader):
+    def find_resources(self, authenticator=None):
+        raise SiteDownloaderError("HTTP 404")
+
+
+def test_failed_posts_are_warnings(tmp_path: Path):
+    with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=FailingDownloader):
+        with context_lines(logging.WARNING) as lines:
+            make_downloader(tmp_path, [post("aaa1111", "https://i.redd.it/a.jpg")]).download()
+    assert lines == ["post aaa1111: failed - HTTP 404 (#1, r/test, FailingDownloader)"]
+
+
+@pytest.mark.parametrize("parallel", (1, 4))
+def test_debug_lines_name_their_post(parallel: int, tmp_path: Path):
+    """With --parallel, posts' lines interleave; each says which post it's about"""
+    posts = [post(f"{n}aa1111", f"https://i.redd.it/{n}.jpg", score=10) for n in range(6)]
+    with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=FakeDownloader):
+        with context_lines(logging.DEBUG) as lines:
+            downloader = make_downloader(tmp_path, posts)
+            downloader.args.parallel = parallel
+            with logs.job_context("job1"):
+                downloader.download()
+    wrote = sorted(line for line in lines if ": Wrote " in line)
+    assert len(wrote) == 6
+    for n, line in enumerate(wrote):
+        assert line.startswith(f"job job1, post {n}aa1111: Wrote ") and line.endswith(f"{n}aa1111.jpg")
 
 
 def test_given_posts_ignore_stop_at_existing(tmp_path: Path):

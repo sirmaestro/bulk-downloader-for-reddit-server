@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import io
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -13,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from bdfr import logs
 from bdfr.configuration import Configuration
 from bdfr.server import DownloadServer, Job, load_token, make_handler
 
@@ -23,8 +26,10 @@ class FakeDownloader:
     """Stands in for Downloader, recording the arguments each job ran with"""
 
     runs = []
+    log_files = []
 
-    def __init__(self, args: Configuration):
+    def __init__(self, args: Configuration, log_file: bool = True):
+        self.log_files.append(log_file)
         self.args = args
         self.progress_callback = None
         self.errors = []
@@ -43,10 +48,11 @@ class FakeDownloader:
 @pytest.fixture()
 def server(tmp_path: Path):
     FakeDownloader.runs = []
+    FakeDownloader.log_files = []
     with patch("bdfr.server.Downloader", FakeDownloader):
         args = Configuration()
         args.stop_at_existing = 0
-        download_server = DownloadServer(args, tmp_path, TOKEN, tmp_path / "serve_log.txt")
+        download_server = DownloadServer(args, tmp_path, TOKEN)
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(download_server))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         yield download_server, f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -134,13 +140,26 @@ def test_user_job_with_page_posts(server):
     assert args.user == ["someone"] and args.submitted and args.stop_at_existing == 5
 
 
-def test_jobs_keep_log_history(server):
-    """Each job's downloader opens the serve log; it must append (rotating by size), not start a new file per job"""
+def test_job_lines_name_the_job(server):
+    """Jobs log to serve_log.txt with the server (their downloaders open no log file), every line tagged with the job"""
     _, base = server
-    job = wait_for(base, call(base, "POST", "/jobs", {"folder": "a", "user": "someone"})[1]["id"])
+    stream = io.StringIO()
+    handler = logs.prepare(logging.StreamHandler(stream), logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(context)s%(message)s"))
+    root = logging.getLogger()
+    level = root.level
+    root.setLevel(logging.DEBUG)
+    root.addHandler(handler)
+    try:
+        job = wait_for(base, call(base, "POST", "/jobs", {"folder": "a", "user": "someone"})[1]["id"])
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(level)
     assert job["state"] == "done"
-    args, _ = FakeDownloader.runs[0]
-    assert args.log_rotate_bytes >= 1024 * 1024
+    assert FakeDownloader.log_files == [False]
+    lines = stream.getvalue().splitlines()
+    assert f"job {job['id']}: Queued: new posts by u/someone into {server[0].root / 'a'}" in lines
+    assert f"job {job['id']}: Done in 0s" in lines
 
 
 def test_token_from_environment(tmp_path: Path, monkeypatch):
@@ -183,6 +202,9 @@ def test_run_server_host(tmp_path: Path, caplog, host, expected, warns):
     assert StopServing.addresses == [(expected, 7635)]
     assert f"http://{expected}:7635" in caplog.text
     assert ("other machines" in caplog.text) is warns
+    # Everything goes to serve_log.txt, and the handler is removed when the server stops
+    assert f"http://{expected}:7635" in (tmp_path / "config" / "serve_log.txt").read_text(encoding="utf-8")
+    assert not any(getattr(h, "baseFilename", "").endswith("serve_log.txt") for h in logging.getLogger().handlers)
 
 
 def test_serve_host_option(tmp_path: Path):

@@ -12,6 +12,7 @@ from sqlite3 import Error, OperationalError
 from typing import Optional
 
 from bdfr import exceptions as errors
+from bdfr import logs
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,7 @@ class HashStore:
             """
             cursor.execute(query)
             self._hash_db.commit()
-            logger.debug("Hash tables created successfully")
+            logger.log(logs.TRACE, "Hash tables created")
         except Error as e:
             logger.critical(f"Error creating hash tables: '{e}'")
 

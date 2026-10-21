@@ -45,9 +45,6 @@ class Configuration(Namespace):
         # Not an option: set by `bdfr serve` so a user's listing only goes back to this time (the window a scheduled
         # job fills)
         self.listing_after: Optional[int] = None
-        # Not an option: set by `bdfr serve` so each job appends to the log, which rotates at this size instead of at
-        # the start of every run
-        self.log_rotate_bytes: int = 0
         # serve only: the watched users' file (default: watchlist.yaml next to BDFR's configuration)
         self.watchlist: Optional[str] = None
         # serve only: the address to listen on (default 127.0.0.1)

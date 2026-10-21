@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from bdfr import __version__
+from bdfr import __version__, logs
 from bdfr.exceptions import ArcticShiftError
 from bdfr.post import Post
 
@@ -181,7 +181,7 @@ class ArcticShift:
             self.request_count += 1
             elapsed = time.monotonic() - self._last_request
             described = f"Arctic Shift request {self.request_count}: {endpoint} {self._describe_params(params)}"
-            logger.log(9, f"Arctic Shift request {self.request_count} URL: {response.url}")
+            logger.log(logs.TRACE, f"Arctic Shift request {self.request_count} URL: {response.url}")
             try:
                 payload = response.json()
             except ValueError:

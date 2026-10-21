@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import logging.handlers
+import contextvars
+import logging
 import os
 import re
 import threading
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from bdfr import exceptions as errors
+from bdfr import logs
 from bdfr.configuration import Configuration
 from bdfr.connector import Connector
 from bdfr.post import Post
@@ -21,7 +23,14 @@ from bdfr.site_downloaders.download_factory import DownloadFactory
 
 logger = logging.getLogger(__name__)
 
-RESULT_NAMES = {False: "new", True: "already downloaded", None: "skipped"}
+# How each log_label() reads in the log
+LOG_NAMES = {
+    "new": "new",
+    "existing": "already downloaded",
+    "duplicate": "duplicate",
+    "skipped": "skipped",
+    "failed": "failed",
+}
 
 
 def duplicate_post_key(post_id: str) -> str:
@@ -55,8 +64,8 @@ class Downloader(Connector):
     # What happened to the files of the submission a thread is downloading, for its summary line
     _outcome = threading.local()
 
-    def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = ()):
-        super().__init__(args, logging_handlers)
+    def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = (), log_file: bool = True):
+        super().__init__(args, logging_handlers, log_file)
         # Called with (submission ID, result of _download_submission, label from result_label) after each
         # submission, in listing order; used by `bdfr serve`
         self.progress_callback: Optional[Callable[[str, Optional[bool], str], None]] = None
@@ -74,9 +83,7 @@ class Downloader(Connector):
         elif result is False:
             consecutive_existing = 0
         if consecutive_existing >= self.args.stop_at_existing:
-            logger.info(
-                f"Reached {consecutive_existing} previously downloaded submissions in a row, stopping this listing"
-            )
+            logger.info(f"{consecutive_existing} already downloaded posts in a row; stopping this listing")
             return True, consecutive_existing
         return False, consecutive_existing
 
@@ -101,7 +108,7 @@ class Downloader(Connector):
                     result, outcome = run
                     number += 1
                     self._log_outcome(number, submission, result, outcome)
-                    totals[result] += 1
+                    totals[self.log_label(result, outcome)] += 1
                     totals["files"] += outcome["files"]["written"] + outcome["files"]["linked"]
                     created = getattr(submission, "created_utc", None)
                     if isinstance(created, (int, float)) and (self.newest_post is None or created > self.newest_post):
@@ -125,7 +132,9 @@ class Downloader(Connector):
                                 stopped = True
                                 break
                             continue
-                        pending.append((submission, pool.submit(self._run_one, submission)))
+                        # In a copy of this thread's context, so its log lines carry the job
+                        context = contextvars.copy_context()
+                        pending.append((submission, pool.submit(context.run, self._run_one, submission)))
                         # Stay a few submissions ahead of the oldest unfinished one. Reading further ahead could fetch
                         # listing pages that --stop-at-existing would never need.
                         while pending and (len(pending) >= workers * 2 or pending[0][1].done()):
@@ -148,16 +157,14 @@ class Downloader(Connector):
                         if finish(finished, future.result()):
                             stopped = True
         except Exception as e:
-            logger.error(f"Uncaught exception: {e}")
-            logger.exception(e)
-            self.errors.append(f"Uncaught exception: {e}")
+            logger.exception(f"Stopped by an unexpected error: {e}")
+            self.errors.append(f"Unexpected error: {e}")
         finally:
             if pool:
                 pool.shutdown(wait=True, cancel_futures=True)
-        logger.info(
-            f"Finished {number} posts: {totals[False]} new ({totals['files']} files written), "
-            f"{totals[True]} already downloaded, {totals[None]} skipped"
-        )
+        counts = ", ".join(f"{totals[label]} {name}" for label, name in LOG_NAMES.items())
+        files = totals["files"]
+        logger.info(f"Finished {number} posts: {counts}; {files} file{'s' if files != 1 else ''} written")
         logger.info(self.arctic_shift.summary())
         self._hash_list_save(False)
         self.close_hash_db()
@@ -175,23 +182,34 @@ class Downloader(Connector):
             return "duplicate"
         return "skipped"
 
+    @classmethod
+    def log_label(cls, result: Optional[bool], outcome: dict) -> str:
+        """result_label, but "failed" (an error) rather than "skipped" (filtered out or nothing to download)"""
+        if result is None and outcome["failed"]:
+            return "failed"
+        return cls.result_label(result, outcome)
+
     def _run_one(self, submission: Post) -> tuple[Optional[bool], dict]:
         """Downloads one submission (in a download thread with --parallel); returns its result and what happened to
         its files"""
-        self._outcome.state = {"files": Counter(), "skip_reason": None, "duplicates_of": [], "module": None}
+        self._outcome.state = self._new_state()
         result = None
-        try:
-            result = self._download_submission(submission)
-        except Exception as e:
-            # One bad submission should not end the whole run
-            logger.error(f"Unhandled exception downloading submission {submission.id}: {e}")
-            logger.exception(e)
-            self._skip_reason = f"error: {e}"
+        with logs.post_context(submission.id):
+            try:
+                result = self._download_submission(submission)
+            except Exception as e:
+                # One bad submission should not end the whole run
+                logger.exception(f"Unexpected error: {e}")
+                self._fail(f"unexpected error: {e}")
         return result, self._outcome.state
+
+    @staticmethod
+    def _new_state() -> dict:
+        return {"files": Counter(), "skip_reason": None, "failed": False, "duplicates_of": [], "module": None}
 
     def _state(self) -> dict:
         if not hasattr(self._outcome, "state"):
-            self._outcome.state = {"files": Counter(), "skip_reason": None, "duplicates_of": [], "module": None}
+            self._outcome.state = self._new_state()
         return self._outcome.state
 
     @property
@@ -219,10 +237,17 @@ class Downloader(Connector):
         self._state()["module"] = name
 
     def _skip(self, reason: str) -> None:
+        """Ends the submission as filtered out or with nothing to download"""
         self._skip_reason = reason
 
+    def _fail(self, reason: str) -> None:
+        """Ends the submission as failed, which is logged as a warning"""
+        self._skip_reason = reason
+        self._state()["failed"] = True
+
     def _log_outcome(self, number: int, submission: Post, result: Optional[bool], outcome: dict):
-        """One line per submission saying what happened to it and why; the per-file lines are debug"""
+        """One line per submission saying what happened to it and why, e.g. `new - 1 file written (#1, r/pics,
+        Direct)`; a warning when it failed. The per-file lines are debug."""
         files = outcome["files"]
         parts = []
         if files["written"]:
@@ -249,9 +274,17 @@ class Downloader(Connector):
             parts.append(outcome["skip_reason"])
         if result is None and not parts:
             parts.append("nothing to download")
-        where = f" in r/{submission.subreddit}" if submission.subreddit else ""
-        module = f" [{outcome['module']}]" if outcome["module"] else ""
-        logger.info(f"#{number} {submission.id}{where}{module}: {RESULT_NAMES[result]} - {'; '.join(parts)}")
+        details = [f"#{number}"]
+        if submission.subreddit:
+            details.append(f"r/{submission.subreddit}")
+        if outcome["module"]:
+            details.append(outcome["module"])
+        label = self.log_label(result, outcome)
+        with logs.post_context(submission.id):
+            logger.log(
+                logging.WARNING if label == "failed" else logging.INFO,
+                f"{LOG_NAMES[label]} - {'; '.join(parts)} ({', '.join(details)})",
+            )
 
     @staticmethod
     def _post_link(submission: Post) -> str:
@@ -266,11 +299,9 @@ class Downloader(Connector):
             return False
         with self._store_lock:
             if submission.id in self._folder_post_ids():
-                logger.debug(f"Submission {submission.id} has files in the folder already")
                 self._files["known_post"] += 1
                 return True
             if self._check_url_exists_or_add(duplicate_post_key(submission.id), None):
-                logger.debug(f"Submission {submission.id} was all duplicates before")
                 self._files["known_duplicate"] += 1
                 return True
         return False
@@ -294,7 +325,7 @@ class Downloader(Connector):
         with self._store_lock:
             known = self._check_url_exists_or_add(link, None) or link in self._run_urls()
         if known:
-            logger.debug(f"Link {link} of submission {submission.id} was downloaded before")
+            logger.debug(f"Its link was downloaded before: {link}")
             self._files["known_link"] += 1
         return known
 
@@ -343,7 +374,7 @@ class Downloader(Connector):
             logger.warning(f"Could not rename {existing} to {destination}: {e}")
             return False
         self._move_hashed_file(existing, destination, file_hash)
-        logger.debug(f"Renamed {existing.name} to {destination.name} in submission {submission.id}")
+        logger.debug(f"Renamed {existing.name} to {destination.name}")
         self._files["renamed"] += 1
         return True
 
@@ -351,22 +382,17 @@ class Downloader(Connector):
         """Whether a resource can be skipped without downloading it: True if it's already downloaded, False if it's
         filtered out, None if it needs downloading"""
         if destination.exists():
-            logger.debug(
-                f"File {destination} from submission {submission.id} in {submission.subreddit} "
-                "already exists, continuing"
-            )
+            logger.debug(f"Already in the folder: {destination.name}")
             self._record_url_of_existing_file(res.url, destination)
             self._run_urls().add(res.url)
             self._files["existing"] += 1
             return True
         elif not self.download_filter.check_resource(res):
-            logger.debug(f"Download filter removed {submission.id} file with URL {submission.url}")
+            logger.debug(f"Removed by the download filter: {res.url}")
             self._files["filtered"] += 1
             return False
         if self._check_url_exists_or_add(res.url, None) or res.url in self._run_urls():
-            logger.debug(
-                f"Url {res.url} from submission {submission.id} in {submission.subreddit} already downloaded before"
-            )
+            logger.debug(f"Downloaded before: {res.url}")
             if not self._rename_existing(self._get_url_hash(res.url), destination, submission):
                 self._files["known_link"] += 1
             self._run_urls().add(res.url)
@@ -387,7 +413,7 @@ class Downloader(Connector):
                 if event is None:
                     in_flight[res.url] = threading.Event()
                     return None
-            logger.debug(f"Submission {submission.id}: waiting for {res.url}, which another post is downloading")
+            logger.debug(f"Waiting for {res.url}, which another post is downloading")
             event.wait()
 
     def _release(self, url: str):
@@ -414,41 +440,26 @@ class Downloader(Connector):
         """Returns True if the submission was downloaded previously, False if anything new was written
         and None if it was filtered, failed or had nothing to download."""
         if submission.id in self.excluded_submission_ids:
-            logger.debug(f"Object {submission.id} in exclusion list, skipping")
             return self._skip("in the exclusion list")
         elif submission.subreddit.lower() in self.args.skip_subreddit:
-            logger.debug(f"Submission {submission.id} in {submission.subreddit} in skip list")
             return self._skip("subreddit is in --skip-subreddit")
         elif (submission.author and submission.author in self.args.ignore_user) or (
             submission.author is None and "DELETED" in self.args.ignore_user
         ):
-            logger.debug(
-                f"Submission {submission.id} in {submission.subreddit} skipped"
-                f' due to {submission.author or "DELETED"} being an ignored user'
-            )
-            return self._skip("posted by an ignored user")
+            return self._skip(f"posted by an ignored user ({submission.author or 'DELETED'})")
         # Archived and exported posts can lack scores; those are not filtered on them
         elif self.args.min_score and submission.score is not None and submission.score < self.args.min_score:
-            logger.debug(
-                f"Submission {submission.id} filtered due to score {submission.score} < [{self.args.min_score}]"
-            )
             return self._skip(f"score {submission.score} is below --min-score {self.args.min_score}")
         elif self.args.max_score and submission.score is not None and self.args.max_score < submission.score:
-            logger.debug(
-                f"Submission {submission.id} filtered due to score {submission.score} > [{self.args.max_score}]"
-            )
             return self._skip(f"score {submission.score} is above --max-score {self.args.max_score}")
         elif submission.upvote_ratio is not None and (
             (self.args.min_score_ratio and submission.upvote_ratio < self.args.min_score_ratio)
             or (self.args.max_score_ratio and self.args.max_score_ratio < submission.upvote_ratio)
         ):
-            logger.debug(f"Submission {submission.id} filtered due to score ratio ({submission.upvote_ratio})")
             return self._skip(f"upvote ratio {submission.upvote_ratio} is outside --min/--max-score-ratio")
         elif not isinstance(submission, Post):
-            logger.warning(f"{submission.id} is not a submission")
             return self._skip("not a submission")
         elif not self.download_filter.check_url(submission.url):
-            logger.debug(f"Submission {submission.id} filtered due to URL {submission.url}")
             return self._skip(f"link removed by --skip-domain or --skip: {submission.url}")
         elif self.args.media_only and getattr(submission, "is_self", False):
             return self._skip("self post (--media-only)")
@@ -457,28 +468,23 @@ class Downloader(Connector):
         if self._post_id_known(submission):
             return True
 
-        logger.debug(f"Attempting to download submission {submission.id}")
         if submission.url is None or submission.url == "":
-            logger.debug("skipped empty url")
             return self._skip("no link")
         try:
             downloader_class = DownloadFactory.pull_lever(submission.url)
             downloader = downloader_class(submission, self.args)
-            logger.debug(f"Using {downloader_class.__name__} with url {submission.url}")
-        except errors.NotADownloadableLinkError as e:
-            logger.error(f"Could not download submission {submission.id}: {e}")
+            logger.debug(f"{downloader_class.__name__}: {submission.url}")
+        except errors.NotADownloadableLinkError:
             return self._skip(f"no downloader for {submission.url}")
         self._module = downloader_class.__name__
         if downloader_class.__name__.lower() in self.args.disable_module:
-            logger.debug(f"Submission {submission.id} skipped due to disabled module {downloader_class.__name__}")
             return self._skip(f"module {downloader_class.__name__} is disabled")
         if self._post_link_known(submission):
             return True
         try:
             content = downloader.find_resources()
         except errors.SiteDownloaderError as e:
-            logger.error(f"Site {downloader_class.__name__} failed to download submission {submission.id}: {e}")
-            return self._skip(f"failed: {e}")
+            return self._fail(str(e))
         already_downloaded = None
         content = list(content)
         for destination, res in self.file_name_formatter.format_resource_paths(content, self.download_directory):
@@ -491,11 +497,7 @@ class Downloader(Connector):
                 try:
                     res.download({"max_wait_time": self.args.max_wait_time, "fail_fast": self.args.fail_fast})
                 except errors.BulkDownloaderException as e:
-                    logger.error(
-                        f"Failed to download resource {res.url} in submission {submission.id} "
-                        f"with downloader {downloader_class.__name__}: {e}"
-                    )
-                    return self._skip(f"download failed: {e}")
+                    return self._fail(f"could not download {res.url}: {e}")
                 # From here on, the hash store is read and changed, so one thread at a time
                 with self._store_lock:
                     resource_hash = res.hash.hexdigest()
@@ -515,10 +517,7 @@ class Downloader(Connector):
                         if self.args.no_dupes:
                             hashed_item = self._get_hashed_item(resource_hash)
                             existing_name = Path(hashed_item).name if hashed_item else "(unknown file)"
-                            logger.debug(
-                                f"Resource hash {resource_hash} from submission {submission.id} downloaded elsewhere"
-                            )
-                            logger.debug(f"URL: {res.url} has the same content as {existing_name}")
+                            logger.debug(f"Same content as {existing_name}: {res.url}")
                             self._files["duplicate"] += 1
                             self._duplicates_of.append(existing_name)
                             self._state()["duplicate_hash"] = resource_hash
@@ -529,10 +528,7 @@ class Downloader(Connector):
                             if hashed_item and Path(hashed_item).exists():
                                 try:
                                     os.link(hashed_item, destination)
-                                    logger.debug(
-                                        f"Hard link made linking {destination} to {hashed_item} "
-                                        f"in submission {submission.id}"
-                                    )
+                                    logger.debug(f"Hard-linked {destination.name} to {hashed_item}")
                                     self._files["linked"] += 1
                                     continue
                                 except OSError as e:
@@ -542,12 +538,9 @@ class Downloader(Connector):
                     try:
                         with destination.open("wb") as file:
                             file.write(res.content)
-                        logger.debug(f"Written file to {destination}")
-                        logger.debug(f"Downloaded submission {submission.id} from {submission.subreddit}")
+                        logger.debug(f"Wrote {destination}")
                     except OSError as e:
-                        logger.exception(e)
-                        logger.error(f"Failed to write file in submission {submission.id} to {destination}: {e}")
-                        return self._skip(f"could not write {destination.name}: {e}")
+                        return self._fail(f"could not write {destination.name}: {e}")
                     self._files["written"] += 1
                     self._folder_post_ids().add(submission.id)
                     creation_time = time.mktime(datetime.fromtimestamp(submission.created_utc).timetuple())
@@ -558,7 +551,7 @@ class Downloader(Connector):
                         self.master_hash_list[resource_hash] = destination
                     self._check_url_exists_or_add(res.url, resource_hash)
                     self._run_urls().add(res.url)
-                    logger.log(9, f"Hash added to master list: {resource_hash}")
+                    logger.log(logs.TRACE, f"Hash of {destination.name}: {resource_hash}")
                     already_downloaded = False
             finally:
                 self._release(res.url)

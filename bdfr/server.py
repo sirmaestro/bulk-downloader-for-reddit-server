@@ -5,6 +5,7 @@
 (scripts/tampermonkey/bdfr-export.user.js). It listens on 127.0.0.1 unless given --host (e.g. in Docker), and every
 request needs the token."""
 
+import configparser
 import copy
 import itertools
 import json
@@ -23,7 +24,7 @@ from typing import Callable, Optional
 
 import platformdirs
 
-from bdfr import __version__
+from bdfr import __version__, logs
 from bdfr.configuration import Configuration
 from bdfr.downloader import Downloader, duplicate_post_key, post_ids_in_names, post_link
 from bdfr.hash_store import HashStore
@@ -34,7 +35,7 @@ DEFAULT_PORT = 7635
 MAX_BODY_BYTES = 20 * 1024 * 1024
 MAX_POSTS_PER_JOB = 5000
 MAX_FINISHED_JOBS = 50
-# serve_log.txt rotates at this size (keeping the config's backup_log_count old files), not at every job
+# serve_log.txt rotates at this size, keeping the config's backup_log_count old files
 SERVE_LOG_BYTES = 10 * 1024 * 1024
 # One folder name directly under the root, so a request can't write anywhere else
 FOLDER_PATTERN = re.compile(r"[\w\-. ]{1,100}")
@@ -100,11 +101,10 @@ class Job:
 
 
 class DownloadServer:
-    def __init__(self, base_args: Configuration, root: Path, token: str, log_path: Path):
+    def __init__(self, base_args: Configuration, root: Path, token: str):
         self.base_args = base_args
         self.root = root
         self.token = token
-        self.log_path = log_path
         self.jobs: dict[str, Job] = {}
         self.current: Optional[Job] = None
         # The weekly baseline for watched users (bdfr/scheduler.py), when serve runs one
@@ -229,7 +229,8 @@ class DownloadServer:
             for old in sorted(finished, key=lambda j: j.finished)[:-MAX_FINISHED_JOBS]:
                 del self.jobs[old.id]
         self._queue.put((1 if scheduled else 0, next(self._order), job))
-        logger.info(f"Queued job {job.id}: {self._describe(job)}")
+        with logs.job_context(job.id):
+            logger.info(f"Queued: {self._describe(job)}")
         return job
 
     def note_gone(self, payload: dict) -> dict:
@@ -267,10 +268,13 @@ class DownloadServer:
                 self.current = None
 
     def _run(self, job: Job):
+        # Every line logged while the job runs, in this thread and its download threads, says which job it's from
+        with logs.job_context(job.id):
+            self._run_job(job)
+
+    def _run_job(self, job: Job):
         args = copy.deepcopy(self.base_args)
         args.directory = str(self.root / job.folder)
-        args.log = str(self.log_path)
-        args.log_rotate_bytes = SERVE_LOG_BYTES
         for key in ("subreddit", "user", "link", "include_id_file", "post_json"):
             setattr(args, key, [])
         args.submitted = False
@@ -297,17 +301,15 @@ class DownloadServer:
             args.listing_before = job.before
             args.listing_after = job.after
 
-        root_logger = logging.getLogger()
-        handlers_before = list(root_logger.handlers)
         job.state = "running"
         started = time.time()
-        logger.info(f"Starting job {job.id}: {self._describe(job)}")
+        logger.info(f"Started: {self._describe(job)}")
+        logger.debug(f"Options: {self._options(args)}")
         # The outcome is published once the job is cleaned up, so whoever sees it finished sees it complete
         state, error = "failed", None
         try:
-            downloader = Downloader(args)
-            # Repeated once the downloader's log file is open, so each job's log says what it was for and how
-            logger.debug(f"Job {job.id}: {self._describe(job)}; {self._options(args)}")
+            # Its lines go to serve_log.txt with the server's, so it opens no log file of its own
+            downloader = Downloader(args, log_file=False)
             downloader.progress_callback = job.record
             downloader.download()
             job.newest_post = downloader.newest_post
@@ -317,19 +319,15 @@ class DownloadServer:
             else:
                 state = "done"
         except Exception as e:
-            logger.exception(f"Job {job.id} failed")
+            logger.exception(f"Unexpected error: {e}")
             error = str(e)
         finally:
-            c = job.counts
-            logger.info(
-                f"Finished job {job.id} ({state}) in {self._duration(time.time() - started)}: {c['new']} new, "
-                f"{c['existing']} already downloaded, {c['duplicate']} duplicates, {c['skipped']} skipped"
-                + (f" - {error}" if error else "")
-            )
-            # Each downloader adds its own file log handler to the root logger
-            for handler in [h for h in root_logger.handlers if h not in handlers_before]:
-                root_logger.removeHandler(handler)
-                handler.close()
+            # The downloader's last line has the post counts
+            took = self._duration(time.time() - started)
+            if error:
+                logger.warning(f"Failed after {took}: {error}")
+            else:
+                logger.info(f"Done in {took}")
             if post_file:
                 post_file.unlink(missing_ok=True)
             job.error = error
@@ -339,7 +337,7 @@ class DownloadServer:
                 try:
                     job.on_finish(job)
                 except Exception:
-                    logger.exception(f"Handling the end of job {job.id} failed")
+                    logger.exception("Handling the end of the job failed")
 
     @staticmethod
     def _options(args: Configuration) -> str:
@@ -358,8 +356,6 @@ class DownloadServer:
         ]
         parts = [f"--{name.replace('_', '-')}" for name in flags]
         parts.append(f"--parallel {args.parallel}")
-        if not getattr(args, "archive_lookups", True):
-            parts.append("no Arctic Shift lookups")
         if args.stop_at_existing:
             parts.append(f"--stop-at-existing {args.stop_at_existing}")
         parts.append(f'--file-scheme "{args.file_scheme}"')
@@ -368,6 +364,8 @@ class DownloadServer:
             if value:
                 shown = ",".join(sorted(value)) if isinstance(value, (list, set)) else value
                 parts.append(f"--{name.replace('_', '-')} {shown}")
+        if not getattr(args, "archive_lookups", True):
+            parts.append("(archive lookups off)")
         return " ".join(parts)
 
     @staticmethod
@@ -466,12 +464,26 @@ def load_token(config_directory: Path) -> str:
     return token
 
 
+def _log_to_file(base_args: Configuration, config_directory: Path) -> logging.Handler:
+    """Everything the server does goes to one file, serve_log.txt (or --log), rotated by size"""
+    path = Path(base_args.log).expanduser() if base_args.log else config_directory / "serve_log.txt"
+    config = configparser.ConfigParser()
+    config.read(base_args.config or config_directory / "default_config.cfg")
+    backup_count = config.getint("DEFAULT", "backup_log_count", fallback=3)
+    handler = logs.serve_log_handler(path, SERVE_LOG_BYTES, backup_count, base_args.verbose or 0)
+    root = logging.getLogger()
+    root.setLevel(min(root.level, handler.level))
+    root.addHandler(handler)
+    return handler
+
+
 def run_server(base_args: Configuration, port: int):
     root = Path(base_args.directory).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     config_directory = Path(platformdirs.user_config_dir("bdfr", "BDFR"))
     token = load_token(config_directory)
-    server = DownloadServer(base_args, root, token, config_directory / "serve_log.txt")
+    log_file = _log_to_file(base_args, config_directory)
+    server = DownloadServer(base_args, root, token)
     from bdfr.scheduler import BaselineScheduler
 
     watchlist = Path(base_args.watchlist).expanduser() if base_args.watchlist else config_directory / "watchlist.yaml"
@@ -493,3 +505,5 @@ def run_server(base_args: Configuration, port: int):
         logger.info("Stopping")
     finally:
         httpd.server_close()
+        logging.getLogger().removeHandler(log_file)
+        log_file.close()

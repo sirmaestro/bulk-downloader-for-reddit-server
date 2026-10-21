@@ -311,24 +311,31 @@ BDFR uses the first of these that exists: `--config`, `./config.cfg`, `./default
 
 ### Reading the logs
 
-The console shows one line per post, and the log file (`log_output.txt`, one run per file, or `serve_log.txt` for `bdfr serve` jobs, which all go in one file that is rotated at 10 MB) also has the debug lines for each file. With `-vv` both also get fine-grained tracing, such as every Arctic Shift request URL.
+`bdfr serve` logs everything, every job included, to `serve_log.txt` in BDFR's [configuration directory](#configuration) (or `--log`), which is kept across restarts and rotated at 10 MB. `bdfr download` starts a new `log_output.txt` for each run, keeping the previous ones as `.1`, `.2`, .... The console (in Docker, `docker logs`) shows the same lines from INFO up; the files also have the DEBUG lines for each file, and `-vv` adds TRACE lines such as every Arctic Shift request URL and the tracebacks of errors.
+
+Each line starts with the time and level, then which job and post it belongs to, so lines from posts downloading in parallel can be told apart. To follow one job or post, search the log for its ID (`job 3fd9e1485ded`, `post 1x9xkq0`).
 
 ```
-Looking up 59 of 200 posts in Arctic Shift:
+2026-10-21 09:09:15 INFO    job 3fd9e1485ded: Started: 200 posts from a page into /data/someone
+2026-10-21 09:09:15 INFO    job 3fd9e1485ded: Looking up 59 of 200 posts in Arctic Shift:
   gallery (40): 1x9xkq0, 1x9xhye, ...
   self post (15): ...
-Arctic Shift request 1: posts/ids (59 IDs) -> 59 posts in 0.9s
-#1 1x9y297 in r/u_someone [Redgifs]: new - 1 file written
-#2 1x9xkq0 in r/pics [Gallery]: new - 4 files written
-#3 1wzgo2n in r/pics [Gallery]: skipped - 2 same as already downloaded 1wzgm15_Title_1.jpg, 1wzgm15_Title_2.jpg
-#4 1wzg1ab in r/pics [Direct]: already downloaded - 1 already in the folder
-Finished 200 posts: 2 new (5 files written), 1 already downloaded, 1 skipped
-Made 1 request to Arctic Shift (59 posts looked up: 40 gallery, 15 self post, 4 crosspost or link to another Reddit post)
+2026-10-21 09:09:16 INFO    job 3fd9e1485ded: Arctic Shift request 1: posts/ids (59 IDs) -> 59 posts in 0.9s
+2026-10-21 09:09:16 DEBUG   job 3fd9e1485ded, post 1x9y297: Redgifs: https://www.redgifs.com/watch/somename
+2026-10-21 09:09:17 DEBUG   job 3fd9e1485ded, post 1x9y297: Wrote /data/someone/1x9y297_Title.mp4
+2026-10-21 09:09:17 INFO    job 3fd9e1485ded, post 1x9y297: new - 1 file written (#1, r/u_someone, Redgifs)
+2026-10-21 09:09:18 INFO    job 3fd9e1485ded, post 1x9xkq0: new - 4 files written (#2, r/pics, Gallery)
+2026-10-21 09:09:18 INFO    job 3fd9e1485ded, post 1wzgo2n: duplicate - 2 same as already downloaded 1wzgm15_Title_1.jpg, 1wzgm15_Title_2.jpg (#3, r/pics, Gallery)
+2026-10-21 09:09:18 INFO    job 3fd9e1485ded, post 1wzg1ab: already downloaded - 1 already in the folder (#4, r/pics, Direct)
+2026-10-21 09:09:19 WARNING job 3fd9e1485ded, post 1wzf0cd: failed - could not download https://i.imgur.com/x.jpg: HTTP 404 (#5, r/pics, Imgur)
+2026-10-21 09:09:20 INFO    job 3fd9e1485ded: Finished 200 posts: 2 new, 1 already downloaded, 1 duplicate, 195 skipped, 1 failed; 5 files written
+2026-10-21 09:09:20 INFO    job 3fd9e1485ded: Made 1 request to Arctic Shift (59 posts looked up: 40 gallery, 15 self post, 4 crosspost or link to another Reddit post)
+2026-10-21 09:09:20 INFO    job 3fd9e1485ded: Done in 5s
 ```
 
 - **Lookups**: posts from the userscript or `--post-json` that link straight to media, v.redd.it videos and galleries sent with their image list are downloaded from the page's data. Other galleries, self posts, crossposts and posts with incomplete data need the full post from Arctic Shift. These are looked up 100 per request, and the log lists them by reason.
-- **Per post**: `new` means something was written, `already downloaded` means its files are already in the folder (or were renamed to the current scheme with `--rename-existing`), and `skipped` gives the reason (a filter, a failure, or the same content as an earlier download).
-- **`bdfr serve`**: the console shows when each job starts and finishes. Polling by the userscript isn't logged, only failed requests.
+- **Per post**, one line: `new` (something was written), `already downloaded` (its files are already in the folder, or were renamed to the current scheme with `--rename-existing`), `duplicate` (the same content as an earlier download), `skipped` (a filter, or nothing to download) or `failed` (an error, logged as a warning), with the reason, then its place in the run, subreddit and site.
+- **`bdfr serve`**: each job logs when it is queued, starts and ends (`Done in 5s`, or a warning `Failed after 5s: ...` when it didn't get through everything, e.g. Arctic Shift stopped answering). Polling by the userscript isn't logged, only failed requests. The scheduler's lines have no job.
 
 ### Configuration File
 
@@ -373,10 +380,6 @@ Several `bdfr download` runs can be scripted one after another, for example with
 ## Filesystem Restrictions
 
 BDFR follows the naming rules of the system it runs on. When saving to a drive with stricter rules, such as a Windows (SMB) share from Linux, set `--filename-restriction-scheme windows` or `filename_restriction_scheme` in the configuration file.
-
-## Manipulating Logfiles
-
-The [scripts](scripts) folder has Bash and PowerShell scripts that read BDFR logs, e.g. to list the IDs of successful or failed downloads.
 
 ## List of currently supported sources
 

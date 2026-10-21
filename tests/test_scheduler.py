@@ -32,7 +32,8 @@ class FakeDownloader:
     newest_post = None
     gate = None  # a threading.Event the run waits for, to hold a job running
 
-    def __init__(self, args: Configuration):
+    def __init__(self, args: Configuration, log_file: bool = True):
+        self.log_file = log_file
         self.args = args
         self.progress_callback = None
         self.errors = list(FakeDownloader.errors_to_report)
@@ -64,7 +65,7 @@ def serve(tmp_path: Path):
     FakeDownloader.errors_to_report = []
     FakeDownloader.newest_post = None
     with patch("bdfr.server.Downloader", FakeDownloader):
-        yield DownloadServer(Configuration(), tmp_path / "root", "token", tmp_path / "serve_log.txt")
+        yield DownloadServer(Configuration(), tmp_path / "root", "token")
 
 
 def write_watchlist(path: Path, text: str, archive_checks: bool = True):
@@ -487,7 +488,7 @@ def test_weekly_baseline_against_mock_archive(tmp_path, clock):
         for key, value in SERVE_DEFAULTS.items():
             setattr(args, key, value)
         args.parallel = 1
-        serve = DownloadServer(args, tmp_path / "root", "token", tmp_path / "serve_log.txt")
+        serve = DownloadServer(args, tmp_path / "root", "token")
         write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
         scheduler = make_scheduler(serve, tmp_path, clock)
         for number in range(3):

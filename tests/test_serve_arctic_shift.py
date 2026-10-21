@@ -38,7 +38,7 @@ def serve(tmp_path: Path, archive: MockArcticShift) -> DownloadServer:
     args.parallel = 1
     root = tmp_path / "root"
     root.mkdir()
-    return DownloadServer(args, root, "token", tmp_path / "serve_log.txt")
+    return DownloadServer(args, root, "token")
 
 
 def run(serve: DownloadServer, payload: dict) -> Job:
