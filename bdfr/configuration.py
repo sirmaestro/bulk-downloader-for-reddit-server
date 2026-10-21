@@ -52,6 +52,8 @@ class Configuration(Namespace):
         # Not an option: set by `bdfr serve` so each job appends to the log, which rotates at this size instead of at
         # the start of every run
         self.log_rotate_bytes: int = 0
+        # serve only: the watched users' file (default: watchlist.yaml next to BDFR's configuration)
+        self.watchlist: Optional[str] = None
         self.rename_existing: bool = False
         # None picks the command's default: arctic-shift for download, reddit for archive and clone
         self.source: Optional[str] = None

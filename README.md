@@ -84,6 +84,22 @@ On every old.reddit page, links to a user's profile go to their submitted posts,
 
 **Collect** (off until you click it, and remembered after that) makes the script keep every post it sees on the pages you visit. **Export** then saves them as JSON for `--post-json`, and **Clear** forgets them; neither needs the server.
 
+### Watched users
+
+`bdfr serve` keeps the folders of the users listed in `watchlist.yaml` (next to BDFR's [configuration](#configuration), or the file given with `--watchlist`) complete from Arctic Shift, without any clicks:
+
+```yaml
+interval_days: 7    # how often each user's archive is checked
+overlap_days: 7     # each check starts this much before the previous one, for posts the archive got late
+retry_hours: 24     # a failed check is retried after this long
+users:
+  - someone                  # into the folder "someone"
+  - name: someone_else
+    folder: Some folder
+```
+
+A user's first check reads their whole archive. After that, each check reads every archived post since the previous check (plus the overlap) to its end, so posts missing between downloaded ones are found too; posts already in the folder cost no requests, so a quiet week is one request. Checks run one at a time with a minute between them, and the file is read again as it changes, so there's no need to restart. A check that fails (Arctic Shift unavailable, ...) is logged as a warning and its window is read again later, so nothing is skipped. `GET /watchlist` (with the token) shows each user's last successful check, last error and next check; progress is in `watchlist_state.json` next to the watchlist.
+
 ## Options
 
 ### Sources
@@ -275,7 +291,7 @@ BDFR uses the first of these that exists: `--config`, `./config.cfg`, `./default
 
 ### Reading the logs
 
-The console shows one line per post, and the log file (`log_output.txt`, or `serve_log.txt` for `bdfr serve` jobs, one job per file) also has the debug lines for each file. With `-vv` both also get fine-grained tracing, such as every Arctic Shift request URL.
+The console shows one line per post, and the log file (`log_output.txt`, one run per file, or `serve_log.txt` for `bdfr serve` jobs, which all go in one file that is rotated at 10 MB) also has the debug lines for each file. With `-vv` both also get fine-grained tracing, such as every Arctic Shift request URL.
 
 ```
 Looking up 59 of 200 posts in Arctic Shift:

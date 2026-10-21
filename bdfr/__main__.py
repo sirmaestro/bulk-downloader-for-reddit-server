@@ -239,6 +239,13 @@ SERVE_DEFAULTS = {
     default=DEFAULT_PORT,
     help=f"Port to listen on (default {DEFAULT_PORT}).",
 )
+@click.option(
+    "--watchlist",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="YAML file of users whose folders are kept complete from Arctic Shift, checked weekly "
+    "(default: watchlist.yaml next to BDFR's configuration).",
+)
 @click.help_option("-h", "--help")
 @click.pass_context
 def cli_serve(context: click.Context, **_):

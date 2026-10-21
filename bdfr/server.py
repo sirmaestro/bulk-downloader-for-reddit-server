@@ -17,7 +17,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import appdirs
 
@@ -65,6 +65,8 @@ class Job:
         # With a user: read every post after this time, to the end (no stopping at downloaded posts), so gaps between
         # downloaded posts are filled
         self.after = after
+        # Called with the job once it has finished, whatever the outcome (used by the scheduler)
+        self.on_finish: Optional[Callable[["Job"], None]] = None
         self.state = "queued"
         self.error: Optional[str] = None
         self.counts = {label: 0 for label in LABELS}
@@ -101,6 +103,8 @@ class DownloadServer:
         self.log_path = log_path
         self.jobs: dict[str, Job] = {}
         self.current: Optional[Job] = None
+        # The weekly baseline for watched users (bdfr/scheduler.py), when serve runs one
+        self.scheduler = None
         self._queue: "queue.Queue[Job]" = queue.Queue()
         self._lock = threading.Lock()
         threading.Thread(target=self._worker, name="bdfr-serve-worker", daemon=True).start()
@@ -186,7 +190,7 @@ class DownloadServer:
             return set()
         return stored
 
-    def submit(self, payload: dict) -> Job:
+    def submit(self, payload: dict, on_finish: Optional[Callable[[Job], None]] = None) -> Job:
         folder = self._folder(payload)
         posts, user = payload.get("posts"), payload.get("user")
         if posts is None and user is None:
@@ -205,6 +209,7 @@ class DownloadServer:
         if after is not None and user is None:
             raise ValueError("'after' needs a 'user'")
         job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all", before, after)
+        job.on_finish = on_finish
         with self._lock:
             self.jobs[job.id] = job
             finished = [j for j in self.jobs.values() if j.finished]
@@ -213,6 +218,12 @@ class DownloadServer:
         self._queue.put(job)
         logger.info(f"Queued job {job.id}: {self._describe(job)}")
         return job
+
+    def watchlist(self) -> dict:
+        """The watched users with their baseline state, for GET /watchlist (the userscript's background sync)"""
+        if self.scheduler is None:
+            return {"users": [], "enabled": False}
+        return self.scheduler.snapshot()
 
     def status(self) -> dict:
         return {
@@ -295,6 +306,11 @@ class DownloadServer:
                 handler.close()
             if post_file:
                 post_file.unlink(missing_ok=True)
+            if job.on_finish:
+                try:
+                    job.on_finish(job)
+                except Exception:
+                    logger.exception(f"Handling the end of job {job.id} failed")
 
     @staticmethod
     def _options(args: Configuration) -> str:
@@ -363,6 +379,8 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/status":
                 self._send(200, server.status())
+            elif self.path == "/watchlist":
+                self._send(200, server.watchlist())
             elif match := re.fullmatch(r"/jobs/(\w+)", self.path):
                 job = server.jobs.get(match.group(1))
                 self._send(200, job.to_dict()) if job else self._send(404, {"error": "No such job"})
@@ -408,6 +426,12 @@ def run_server(base_args: Configuration, port: int):
     config_directory = Path(appdirs.user_config_dir("bdfr", "BDFR"))
     token = load_token(config_directory)
     server = DownloadServer(base_args, root, token, config_directory / "serve_log.txt")
+    from bdfr.scheduler import BaselineScheduler
+
+    watchlist = Path(base_args.watchlist).expanduser() if base_args.watchlist else config_directory / "watchlist.yaml"
+    server.scheduler = BaselineScheduler(server, watchlist)
+    server.scheduler.start()
+    logger.info(f"Watched users are read from {watchlist}" + ("" if watchlist.exists() else " (not there yet)"))
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(server))
     logger.info(f"Listening on http://127.0.0.1:{port}, downloading into folders under {root}")
     logger.info(f"Token for the Tampermonkey script: {token}")
