@@ -119,7 +119,7 @@ class Redgifs(BaseDownloader):
                     out.add(urls.get("hd") or urls["sd"])
             else:
                 raise KeyError
-        except (KeyError, AttributeError, TypeError):
+        except KeyError, AttributeError, TypeError:
             raise SiteDownloaderError(f"Failed to find JSON data in page: {content.text[:200]}")
 
         # Update subdomain if old one is returned

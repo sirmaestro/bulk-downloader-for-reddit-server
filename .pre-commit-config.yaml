@@ -1,6 +1,10 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 
+# black must run on the Python the code targets (pyproject.toml) to check its output
+default_language_version:
+  python: python3.15
+
 repos:
   - repo: https://github.com/psf/black-pre-commit-mirror
     rev: 26.10.1

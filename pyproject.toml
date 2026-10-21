@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bdfr"
 description = "Keeps folders of Reddit media up to date from the Arctic Shift archive, without duplicates (server fork of BDFR)"
-requires-python = ">=3.11"
+requires-python = ">=3.15"
 license-files = ["LICENSE"]
 dependencies = [
     "beautifulsoup4>=4.15.0",
@@ -42,7 +42,7 @@ bdfr = "bdfr.__main__:cli"
 
 [tool.black]
 line-length = 120
-target-version = ["py311"]
+target-version = ["py315"]
 
 [tool.flake8]
 exclude = ["scripts"]
@@ -54,7 +54,7 @@ statistics = true
 
 [tool.isort]
 profile = "black"
-py_version = 311
+py_version = 315
 multi_line_output = 3
 line_length = 120
 indent = 4

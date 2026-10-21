@@ -66,7 +66,7 @@ Rules:
 - Logging: each submission gets one INFO line from `Downloader._log_outcome` (set `self._skip_reason` via `self._skip(...)` on early returns, count files in `self._files`); per-file lines are DEBUG. The scripts in `scripts/` grep the per-file and filter debug lines ("Downloaded submission", "Resource hash", "already exists, continuing", "Hard link made", "filtered due to score", ...), so keep their wording and word positions.
 - Never write to a configuration file (`--config`, `config.cfg`, `default_config.cfg`); the packaged `bdfr/default_config.cfg` is only copied to the configuration directory when none exists.
 - The configuration directory comes from `platformdirs` (`bdfr`, `BDFR`), the same path `appdirs` gave before 3.0; it holds users' `serve_token.txt`, `watchlist.yaml` and `watchlist_state.json`, so don't change it.
-- Python 3.11+ (CI runs 3.11 and 3.14; Docker uses 3.14).
+- Python 3.15+ (CI and Docker use 3.15).
 
 ## Style
 

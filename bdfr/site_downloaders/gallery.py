@@ -33,10 +33,10 @@ class Gallery(BaseDownloader):
     def find_resources(self) -> list[Resource]:
         try:
             items = self.post.gallery_data["items"]
-        except (AttributeError, TypeError):
+        except AttributeError, TypeError:
             try:
                 items = self.post.crosspost_parent_list[0]["gallery_data"]["items"]
-            except (AttributeError, IndexError, TypeError, KeyError):
+            except AttributeError, IndexError, TypeError, KeyError:
                 # Reddit drops the image list of removed posts
                 removed = getattr(self.post, "removed_by_category", None)
                 if removed:

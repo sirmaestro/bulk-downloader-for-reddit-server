@@ -43,7 +43,7 @@ class VReddit(Youtube):
         for media in sources:
             try:
                 return media["reddit_video"]["hls_url"]
-            except (KeyError, TypeError):
+            except KeyError, TypeError:
                 continue
         return self.post.url
 

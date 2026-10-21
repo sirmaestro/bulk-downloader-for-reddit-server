@@ -15,7 +15,7 @@ What this fork adds over upstream:
 
 ## Installation
 
-Needs Python 3.11 or later, and [ffmpeg](https://ffmpeg.org) on `PATH` for Reddit-hosted videos. To run the server in Docker instead, see [Running in Docker](#running-in-docker).
+Needs Python 3.15 or later, and [ffmpeg](https://ffmpeg.org) on `PATH` for Reddit-hosted videos. To run the server in Docker instead, see [Running in Docker](#running-in-docker).
 
 ```bash
 git clone https://github.com/sirmaestro/bulk-downloader-for-reddit-server.git
