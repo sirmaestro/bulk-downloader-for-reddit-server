@@ -46,6 +46,9 @@ class Configuration(Namespace):
         self.media_only: bool = False
         # Not an option: set by `bdfr serve` so a user's listing starts below the posts the page already sent
         self.listing_before: Optional[int] = None
+        # Not an option: set by `bdfr serve` so a user's listing only goes back to this time (the window a scheduled
+        # job fills)
+        self.listing_after: Optional[int] = None
         # Not an option: set by `bdfr serve` so each job appends to the log, which rotates at this size instead of at
         # the start of every run
         self.log_rotate_bytes: int = 0

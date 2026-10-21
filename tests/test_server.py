@@ -87,6 +87,10 @@ def test_requires_token(server):
         {"folder": "ok"},
         {"folder": "ok", "user": "not a user!"},
         {"folder": "ok", "posts": []},
+        {"folder": "ok", "user": "someone", "after": "last week"},
+        {"folder": "ok", "user": "someone", "after": 0},
+        {"folder": "ok", "user": "someone", "after": True},
+        {"folder": "ok", "posts": [{"id": "abc"}], "after": 1700000000},
         [],
     ),
 )
@@ -277,3 +281,12 @@ def test_user_job_starts_below_the_page(server):
     assert args.listing_before == 1792210918
     for bad in ("1792210918", -5, True, 1.5):
         assert call(base, "POST", "/jobs", {"folder": "someone", "user": "someone", "before": bad})[0] == 400
+
+
+def test_user_job_after_reads_the_whole_window(server):
+    _, base = server
+    _, job = call(base, "POST", "/jobs", {"folder": "someone", "user": "someone", "after": 1792210918})
+    assert wait_for(base, job["id"])["state"] == "done"
+    args, _ = FakeDownloader.runs[0]
+    assert args.listing_after == 1792210918
+    assert args.stop_at_existing == 0

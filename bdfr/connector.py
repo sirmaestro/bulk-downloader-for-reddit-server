@@ -395,11 +395,12 @@ class RedditConnector(metaclass=ABCMeta):
         if self.args.submitted:
             if not self.args.user:
                 logger.warning("At least one user must be supplied to download user data")
+            user_after = max(filter(None, (after, getattr(self.args, "listing_after", None))), default=None)
             for user in self.args.user:
                 logger.debug(f"Retrieving submitted posts of user {user} via Arctic Shift")
                 out.append(
                     self.arctic_shift.submissions(
-                        author=user, limit=self.args.limit, after=after, before=self.args.listing_before
+                        author=user, limit=self.args.limit, after=user_after, before=self.args.listing_before
                     )
                 )
 

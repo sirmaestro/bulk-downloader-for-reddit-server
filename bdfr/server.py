@@ -51,6 +51,7 @@ class Job:
         user: Optional[str] = None,
         full_archive: bool = False,
         before: Optional[int] = None,
+        after: Optional[int] = None,
     ):
         self.id = job_id
         self.folder = folder
@@ -61,6 +62,9 @@ class Job:
         # With a user: only read the listing below this time (the oldest post on the page), since the page's posts
         # are already in hand
         self.before = before
+        # With a user: read every post after this time, to the end (no stopping at downloaded posts), so gaps between
+        # downloaded posts are filled
+        self.after = after
         self.state = "queued"
         self.error: Optional[str] = None
         self.counts = {label: 0 for label in LABELS}
@@ -194,10 +198,13 @@ class DownloadServer:
             posts = [post for post in posts if isinstance(post, dict) and post.get("id")]
         if user is not None and (not isinstance(user, str) or not USER_PATTERN.fullmatch(user)):
             raise ValueError("'user' must be a Reddit username")
-        before = payload.get("before")
-        if before is not None and (not isinstance(before, int) or isinstance(before, bool) or before <= 0):
-            raise ValueError("'before' must be a time in seconds since 1970")
-        job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all", before)
+        before, after = payload.get("before"), payload.get("after")
+        for name, value in (("before", before), ("after", after)):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
+                raise ValueError(f"'{name}' must be a time in seconds since 1970")
+        if after is not None and user is None:
+            raise ValueError("'after' needs a 'user'")
+        job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all", before, after)
         with self._lock:
             self.jobs[job.id] = job
             finished = [j for j in self.jobs.values() if j.finished]
@@ -248,8 +255,10 @@ class DownloadServer:
             # archive mostly costs the listing's own requests.
             args.user = [job.user]
             args.submitted = True
-            args.stop_at_existing = 0 if job.full_archive else (args.stop_at_existing or 5)
+            full = job.full_archive or job.after is not None
+            args.stop_at_existing = 0 if full else (args.stop_at_existing or 5)
             args.listing_before = job.before
+            args.listing_after = job.after
 
         root_logger = logging.getLogger()
         handlers_before = list(root_logger.handlers)
@@ -311,6 +320,9 @@ class DownloadServer:
     def _describe(self, job: Job) -> str:
         if job.user:
             source = f"{'all archived' if job.full_archive else 'new'} posts by u/{job.user}"
+            if job.after:
+                since = time.strftime("%Y-%m-%d %H:%M", time.localtime(job.after))
+                source = f"all archived posts by u/{job.user} since {since}"
             if job.before:
                 source += f" older than {time.strftime('%Y-%m-%d %H:%M', time.localtime(job.before))}"
             source += f" (with {len(job.posts)} from the page)" if job.posts else ""
