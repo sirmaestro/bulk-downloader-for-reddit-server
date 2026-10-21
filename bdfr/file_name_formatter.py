@@ -137,13 +137,20 @@ class FileNameFormatter:
 
         try:
             file_path = self.limit_file_name_length(file_name, ending, subfolder)
+            post_id = str(resource.source_submission.id)
+            if post_id in file_name and post_id not in file_path.name and not file_path.exists():
+                # Shortening only protected 6-character IDs at the end; a file already named that way keeps its name
+                file_path = self.limit_file_name_length(file_name, ending, subfolder, post_id)
         except TypeError:
             raise BulkDownloaderException(f"Could not determine path name: {subfolder}, {index}, {resource.extension}")
         return file_path
 
-    def limit_file_name_length(self, filename: str, ending: str, root: Path) -> Path:
+    def limit_file_name_length(self, filename: str, ending: str, root: Path, post_id: Optional[str] = None) -> Path:
         root = root.resolve().expanduser()
-        possible_id = re.search(r"((?:_\w{6})?$)", filename)
+        if post_id and filename.endswith(f"_{post_id}"):
+            possible_id = re.search(rf"(_{re.escape(post_id)})$", filename)
+        else:
+            possible_id = re.search(r"((?:_\w{6})?$)", filename)
         if possible_id:
             ending = possible_id.group(1) + ending
             filename = filename[: possible_id.start()]

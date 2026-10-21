@@ -269,6 +269,31 @@ def test_preserve_id_append_when_shortening(
     assert len(str(result)) <= FileNameFormatter.find_max_path_length()
 
 
+@pytest.mark.parametrize(("index", "expected_end"), ((None, "_abc1234.png"), (2, "_abc1234_2.png")))
+def test_shortening_keeps_seven_character_post_id(
+    submission: MagicMock, tmp_path: Path, index: Optional[int], expected_end: str
+):
+    submission.title = "A" * 300
+    submission.id = "abc1234"
+    resource = Resource(submission, "https://example.com/x.png", lambda: None, ".png")
+    formatter = FileNameFormatter("{REDDITOR}_{TITLE}_{POSTID}", "", "ISO")
+    result = formatter.format_path(resource, tmp_path, index)
+    assert result.name.endswith(expected_end)
+    assert len(result.name.encode("utf-8")) <= 255
+
+
+def test_shortening_reuses_existing_name_that_lost_the_post_id(submission: MagicMock, tmp_path: Path):
+    """Files shortened before 7-character IDs were kept stay recognised by their path"""
+    submission.title = "A" * 300
+    submission.id = "abc1234"
+    resource = Resource(submission, "https://example.com/x.png", lambda: None, ".png")
+    formatter = FileNameFormatter("{REDDITOR}_{TITLE}_{POSTID}", "", "ISO")
+    legacy = formatter.limit_file_name_length("person_" + "A" * 300 + "_abc1234", ".png", tmp_path)
+    assert "abc1234" not in legacy.name
+    legacy.touch()
+    assert formatter.format_path(resource, tmp_path) == legacy
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Test broken on windows github")
 def test_shorten_filename_real(submission: MagicMock, tmp_path: Path):
     submission.title = "A" * 500

@@ -58,4 +58,4 @@ Match the surrounding code. Line length 120; black/isort settings are in `pyproj
 - `cloner.py` skips writing archive entries when the download directory contains `Reddit_imgur` (a personal hack from the original fork).
 - `archiver.py` and `cloner.py` log `submission.id` in their listing-level `except`, which is unbound if the first item fails.
 - `docs/` is upstream's documentation and partly out of date.
-- `FileNameFormatter.limit_file_name_length` only protects 6-character post IDs from truncation; current IDs have 7, so very long titles can lose the ID when `{POSTID}` ends the scheme (the old default). Schemes starting with `{POSTID}` avoid it.
+- Files shortened before `format_path` protected the post ID at the end of a name (any length) may lack their ID; they keep that name (it is reused when it exists), so `/known` only recognises them by link.
