@@ -170,6 +170,22 @@ class RedditConnector(metaclass=ABCMeta):
             self.__open_hash_db(fn)
             
     def __convert_hash_files_to_db(self, db_path: Path):
+        # Converted into a temporary file that replaces db_path only once complete, so a failure leaves no partial DB
+        # (which would block the next conversion)
+        temp_path = f"{db_path}.converting"
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        try:
+            self.__fill_hash_db(temp_path)
+            self.close_hash_db()
+            os.replace(temp_path, db_path)
+        except BaseException:
+            self.close_hash_db()
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    def __fill_hash_db(self, db_path: str):
         self.__create_hash_db(db_path)
 
         logger.info("Converting hash files...")
@@ -185,7 +201,7 @@ class RedditConnector(metaclass=ABCMeta):
             try:
                 cursor.executemany(query, data)
             except OperationalError as e:
-                logger.critical(f"Error occurred: '{e}'")
+                raise errors.BulkDownloaderException(f"Could not convert hash_list.json: {e}")
             self.__hash_db_conn.commit()
             logger.info(f"Converted {len(dict_json)} hashes")
             dict_json = None
@@ -202,7 +218,7 @@ class RedditConnector(metaclass=ABCMeta):
             try:
                 cursor.executemany(query, data)
             except OperationalError as e:
-                logger.critical(f"Error occurred: '{e}'")
+                raise errors.BulkDownloaderException(f"Could not convert hash_file_list.json: {e}")
             self.__hash_db_conn.commit()
             logger.info(f"Converted {len(dict_json)} file entries")
             dict_json = None
@@ -219,7 +235,7 @@ class RedditConnector(metaclass=ABCMeta):
             try:
                 cursor.executemany(query, data)
             except OperationalError as e:
-                logger.critical(f"Error occurred: '{e}'")
+                raise errors.BulkDownloaderException(f"Could not convert hash_url_list.json: {e}")
             self.__hash_db_conn.commit()
             logger.info(f"Converted {len(dict_json)} url entries")
             dict_json = None

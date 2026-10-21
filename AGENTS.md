@@ -54,7 +54,7 @@ Match the surrounding code. Line length 120; black/isort settings are in `pyproj
 
 ## Known issues (not yet fixed)
 
-- Hash store: JSON mode mixes `str` and `Path` values; converting JSON to SQLite isn't atomic (a failure leaves a partial DB that blocks the next conversion); SQLite commits once per row.
+- Hash store: JSON mode mixes `str` and `Path` values; SQLite commits once per row.
 - `cloner.py` skips writing archive entries when the download directory contains `Reddit_imgur` (a personal hack from the original fork).
 - `archiver.py` and `cloner.py` log `submission.id` in their listing-level `except`, which is unbound if the first item fails.
 - `docs/` is upstream's documentation and partly out of date.
