@@ -1,14 +1,13 @@
 name: Python Test
 
 on:
-  push:
-    branches: [ master ]
-    paths-ignore:
-      - "**.md"
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
     paths-ignore:
       - "**.md"
+  # Pushes to main and version tags run these from release.yml, before building the image
+  workflow_call:
+  workflow_dispatch:
 
 jobs:
   test:

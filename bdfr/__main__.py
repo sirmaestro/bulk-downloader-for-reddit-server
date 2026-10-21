@@ -96,7 +96,7 @@ def _check_version(context, param, value):
     if not value or context.resilient_parsing:
         return
     # This fork is not published, so PyPI's bdfr version says nothing about it
-    print(f"bdfr (saved-hashes fork) v{__version__}")
+    print(f"bdfr (server fork) v{__version__}")
     context.exit()
 
 

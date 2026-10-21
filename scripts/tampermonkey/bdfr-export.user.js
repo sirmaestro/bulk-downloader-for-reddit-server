@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.8
+// @version      4.9
 // @description  Downloads the posts on old.reddit pages through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @grant        GM_getValue
@@ -14,6 +14,8 @@
 // bdfr serve on another machine (e.g. Docker on a home server): Tampermonkey asks once to allow its address
 // @connect      *
 // @run-at       document-idle
+// @updateURL    https://github.com/sirmaestro/bulk-downloader-for-reddit-server/releases/latest/download/bdfr-export.user.js
+// @downloadURL  https://github.com/sirmaestro/bulk-downloader-for-reddit-server/releases/latest/download/bdfr-export.user.js
 // ==/UserScript==
 
 (function () {

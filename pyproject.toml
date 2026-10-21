@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bdfr"
-description = "Keeps folders of Reddit media up to date from the Arctic Shift archive, without duplicates (saved-hashes fork of BDFR)"
+description = "Keeps folders of Reddit media up to date from the Arctic Shift archive, without duplicates (server fork of BDFR)"
 readme = "README.md"
 requires-python = ">=3.11"
 license-files = ["LICENSE"]
@@ -54,7 +54,7 @@ dev = [
 ]
 
 [project.urls]
-"Source" = "https://github.com/sirmaestro/bulk-downloader-for-reddit_with-saved-hashes"
+"Source" = "https://github.com/sirmaestro/bulk-downloader-for-reddit-server"
 "Upstream" = "https://github.com/aliparlakci/bulk-downloader-for-reddit"
 
 [project.scripts]

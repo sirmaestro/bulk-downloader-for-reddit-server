@@ -1,4 +1,4 @@
-# Bulk Downloader for Reddit (saved-hashes fork)
+# Bulk Downloader for Reddit Server
 
 A fork of [Bulk Downloader for Reddit](https://github.com/aliparlakci/bulk-downloader-for-reddit) (BDFR) that keeps folders of Reddit media up to date. It runs as a small server, `bdfr serve`, for example in Docker on an always-on machine. A Tampermonkey userscript sends it the posts on the old.reddit.com pages you visit, and it checks a watch list of users against the [Arctic Shift](https://arctic-shift.photon-reddit.com) archive every week. Media is downloaded from where it is hosted (i.redd.it, v.redd.it, Redgifs, Imgur and so on), and each folder keeps a hash store, so nothing is downloaded twice. `bdfr download` does the same from the command line.
 
@@ -18,8 +18,8 @@ What this fork adds over upstream:
 Needs Python 3.11 or later, and [ffmpeg](https://ffmpeg.org) on `PATH` for Reddit-hosted videos. To run the server in Docker instead, see [Running in Docker](#running-in-docker).
 
 ```bash
-git clone https://github.com/sirmaestro/bulk-downloader-for-reddit_with-saved-hashes.git
-cd bulk-downloader-for-reddit_with-saved-hashes
+git clone https://github.com/sirmaestro/bulk-downloader-for-reddit-server.git
+cd bulk-downloader-for-reddit-server
 python -m pip install -e .
 ```
 
@@ -44,7 +44,7 @@ The Tampermonkey script [scripts/tampermonkey/bdfr-export.user.js](scripts/tampe
 
     It listens on `http://127.0.0.1:7635` (change with `--port`) and prints a token, which is also saved as `serve_token.txt` in BDFR's [configuration directory](#configuration). Only programs on your computer can reach it, and every request must carry the token.
 
-2. Install the script in Tampermonkey. The first time you click a button it asks for the server address and token (change them later with **⚙**).
+2. Install the script in Tampermonkey: with Tampermonkey installed, open [bdfr-export.user.js from the latest release](https://github.com/sirmaestro/bulk-downloader-for-reddit-server/releases/latest/download/bdfr-export.user.js). Tampermonkey checks that address for updates. The first time you click a button it asks for the server address and token (change them later with **⚙**).
 3. Open a user's page, such as `old.reddit.com/user/someone/submitted`. A small panel appears at the bottom right (it brightens when you hover over it), and posts you already have are marked as the page loads, including posts added by RES's Never Ending Reddit. Click:
     - **Download** to download the posts on the page that aren't marked yet, into a folder named after the user. When the page may not have everything new, it also reads the user's posts from the Arctic Shift archive, starting just below the oldest post on the page (the page's own posts are already in hand) and going back until 5 already-downloaded posts in a row (`--stop-at-existing`). That happens when the page is empty (the user's posts are hidden or removed on Reddit, but the archive may still have them), or its oldest post isn't downloaded yet, so there may be more beyond it. Arctic Shift is hours behind Reddit, so it can't add anything newer than the page; when the page already reaches posts you have, no archive request is made.
     - Tick **Archive** (remembered) to have every Download go through the rest of the user's archive, everything older than the page's oldest post, finding posts that were removed from Reddit or are older than your last download. Posts removed from Reddit within the page's own time range aren't looked for; scroll less far, or use an empty page, to include them. Posts already in the folder, by ID, link, or as known duplicates, are recognised without any request, so this costs the listing itself: about one request per 60–200 archived posts (e.g. 11 requests for a user with 618 archived posts).
@@ -91,7 +91,7 @@ To move a user's old account into their new one, move the old folder's files int
 
 ### Running in Docker
 
-To run the server on an always-on machine, use the [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml): set the download folder, the user ID that should own the files and `BDFR_TOKEN`, then `docker compose up -d --build`. The watchlist goes in `config/bdfr/watchlist.yaml`. The container listens on the network (`--host 0.0.0.0`), so in the userscript's ⚙ use the machine's LAN address, e.g. `http://192.168.1.20:7635`. The token is the only protection and isn't encrypted, so keep the port inside your home network.
+To run the server on an always-on machine, use the image `ghcr.io/sirmaestro/bulk-downloader-for-reddit-server` (`latest` follows the main branch; releases also have version tags such as `3.0.0`, for amd64 and arm64) with [docker-compose.yml](docker-compose.yml): set the download folder, the user ID that should own the files and `BDFR_TOKEN`, then `docker compose up -d`. To update, run `docker compose pull && docker compose up -d`; to build from your checkout with the [Dockerfile](Dockerfile) instead, `docker compose up -d --build`. The watchlist goes in `config/bdfr/watchlist.yaml`. The container listens on the network (`--host 0.0.0.0`), so in the userscript's ⚙ use the machine's LAN address, e.g. `http://192.168.1.20:7635`. The token is the only protection and isn't encrypted, so keep the port inside your home network.
 
 
 Day to day, the userscript brings watched users' new posts from Reddit itself: on any old.reddit page you open, users not synced for 6 hours (`syncEveryHours` in `SETTINGS`) have their newest posts read with your login (`submitted.json`, 100 posts per request, 2 seconds apart) until 5 posts in a row are already downloaded, and the new media posts are sent to the server as a job. Galleries come with their images, so this costs Arctic Shift nothing. One tab syncs at a time, and nothing shows on the page; failures (logged out, the server unreachable, ...) are logged in the browser console (F12) as warnings starting `BDFR sync:`, and that user is tried again after an hour. A suspended or deleted account (Reddit answers 403 or 404 and the profile says so) is reported to the server and gets no archive checks. While its newest post is less than `gone_active_days` (14) old it is still synced as usual, since temporary suspensions and shadowbans get lifted; after that the server leaves it out of the sync, and every `gone_recheck_days` (30) it is looked at on Reddit once more, and any post of theirs sent to the server brings it back sooner. Reddit also answers 404 for shadowbanned accounts, so "deleted" isn't always for good. `GET /watchlist` lists these users under `gone`; hibernating users (no post for `hibernate_days`) are synced weekly, which is what notices them posting again, and aliases are never synced. For NSFW users, allow mature content in your Reddit preferences. To sync every watched user now, however recently they were synced, click Sync in the panel or pick "Sync watched users now" in Tampermonkey's menu on any old.reddit page. Clicking Sync again while it runs stops it after the current user; a Sync that didn't finish (stopped, tab closed, server down) is carried on by the next one within a day, skipping the users it already synced. The sync follows Reddit's rate limit: when Reddit says few requests are left it waits for the limit to reset (shown in the panel), and an HTTP 429 is waited out and retried up to 3 times. Its waits keep their pace in background tabs. Turn it off with `backgroundSync: false`. Reddit itself only lists a user's newest 1000 posts and nothing removed, which is what the archive checks below are for.
@@ -116,7 +116,7 @@ bdfr download ./output -l 1xa496l -l https://www.reddit.com/r/aww/comments/1xae8
 bdfr download ./output --post-json bdfr-posts-20261020-153000.json
 ```
 
-Options can also come from a YAML file with `--opts my_opts.yaml`, using the option names with underscores instead of dashes (`file_scheme`, not `file-scheme`); see [opts_example.yaml](opts_example.yaml). Options given more than once on the command line are lists in YAML. Command line options take priority over the file.
+Options can also come from a YAML file with `--opts my_opts.yaml`, using the option names with underscores instead of dashes (`file_scheme`, not `file-scheme`). Options given more than once on the command line are lists in YAML. Command line options take priority over the file.
 
 ### Keeping a folder up to date
 
@@ -397,3 +397,5 @@ The [scripts](scripts) folder has Bash and PowerShell scripts that read BDFR log
 ## Contributing
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how a download flows through the code, and [AGENTS.md](AGENTS.md) for the layout, how to run the tests, and the invariants that keep existing folders from being downloaded again.
+
+Every push to `main` that passes the tests publishes the Docker image as `latest`. To make a release, push a version tag (`git tag v3.0.1 && git push origin v3.0.1`): [release.yml](.github/workflows/release.yml) then also publishes the image as `3.0.1` and `3.0`, and creates a GitHub release with the userscript attached. Raise the userscript's `@version` when it changes, or Tampermonkey won't offer the update.
