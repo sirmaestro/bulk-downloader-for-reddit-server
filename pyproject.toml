@@ -5,24 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bdfr"
 description = "Keeps folders of Reddit media up to date from the Arctic Shift archive, without duplicates (server fork of BDFR)"
-readme = "README.md"
 requires-python = ">=3.11"
 license-files = ["LICENSE"]
-keywords = ["reddit", "download", "archive", "arctic-shift"]
-authors = [{name = "Ali Parlakci", email = "parlakciali@gmail.com"}]
-maintainers = [{name = "Serene Arc", email = "serenical@gmail.com"}]
-classifiers = [
-    "Environment :: Console",
-    "Environment :: Web Environment",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
-    "Natural Language :: English",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-]
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "click>=8.5.0",
@@ -52,10 +36,6 @@ dev = [
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
 ]
-
-[project.urls]
-"Source" = "https://github.com/sirmaestro/bulk-downloader-for-reddit-server"
-"Upstream" = "https://github.com/aliparlakci/bulk-downloader-for-reddit"
 
 [project.scripts]
 bdfr = "bdfr.__main__:cli"

@@ -8,7 +8,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml LICENSE ./
 COPY bdfr ./bdfr
 RUN pip install --no-cache-dir . && rm -rf /src
 
