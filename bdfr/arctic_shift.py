@@ -12,12 +12,11 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-import praw
-import praw.models
 import requests
 
 from bdfr import __version__
 from bdfr.exceptions import ArcticShiftError
+from bdfr.post import Post
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +37,7 @@ class ArcticShift:
     MIN_REQUEST_INTERVAL = 1.0
     REDDIT_HOSTS = ("reddit.com", "www.reddit.com", "old.reddit.com", "new.reddit.com", "np.reddit.com", "v.redd.it")
 
-    def __init__(self, reddit_instance: praw.Reddit):
-        self.reddit_instance = reddit_instance
+    def __init__(self):
         self.session = requests.Session()
         self.session.headers["User-Agent"] = f"bdfr/{__version__} (personal archiving)"
         self.request_count = 0
@@ -50,7 +48,7 @@ class ArcticShift:
 
     def submissions(
         self, limit: Optional[int] = None, after: Optional[int] = None, before: Optional[int] = None, **query: str
-    ) -> Iterator[praw.models.Submission]:
+    ) -> Iterator[Post]:
         """Yields submissions newest first for a query such as author=name or subreddit=name, created after `after`
         and before `before` (epoch seconds) when given"""
         params = dict(query, sort="desc")
@@ -81,9 +79,7 @@ class ArcticShift:
             # Posts sharing the oldest timestamp may straddle pages, so overlap by a second and skip ones already seen
             params["before"] = int(min(post["created_utc"] for post in page)) + 1
 
-    def submissions_from_posts(
-        self, posts: Iterable[dict], needs_lookup=None
-    ) -> Iterator[praw.models.Submission]:
+    def submissions_from_posts(self, posts: Iterable[dict], needs_lookup=None) -> Iterator[Post]:
         """Yields submissions for posts known only by ID or by partial data, newest first.
 
         Posts are looked up in batches, only when reached, and only if needs_lookup(post) says the data is not enough
@@ -151,15 +147,9 @@ class ArcticShift:
             return "self post"
         return "crosspost or link to another Reddit post"
 
-    def to_submission(self, data: dict) -> praw.models.Submission:
-        data = dict(data)
-        for key in ("link_flair_text", "score", "upvote_ratio"):
-            data.setdefault(key, None)
-        data.setdefault("selftext", "")
-        submission = praw.models.Submission(self.reddit_instance, _data=data)
-        # Everything BDFR needs is in the data, so stop PRAW from fetching missing attributes from Reddit's API
-        submission._fetched = True
-        return submission
+    @staticmethod
+    def to_submission(data: dict) -> Post:
+        return Post(data)
 
     def _get(self, endpoint: str, params: dict) -> list[dict]:
         error = None

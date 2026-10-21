@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import praw
 import pytest
 
 from bdfr.arctic_shift import ArcticShift, read_post_json, submission_id_from_link
@@ -32,8 +31,8 @@ def make_response(data=None, status: int = 200, error: str = None, headers: dict
 
 
 @pytest.fixture()
-def arctic_shift(reddit_instance: praw.Reddit) -> ArcticShift:
-    client = ArcticShift(reddit_instance)
+def arctic_shift() -> ArcticShift:
+    client = ArcticShift()
     client.MIN_REQUEST_INTERVAL = 0
     client.session = MagicMock()
     return client
@@ -94,8 +93,8 @@ def test_bad_request_raises(arctic_shift: ArcticShift):
 
 def test_submission_does_not_fetch_from_reddit(arctic_shift: ArcticShift):
     submission = arctic_shift.to_submission(make_post("a", 100))
-    assert submission.author.name == "someone"
-    assert submission.subreddit.display_name == "test"
+    assert submission.author == "someone"
+    assert submission.subreddit == "test"
     assert submission.score is None
     with pytest.raises(AttributeError):
         _ = submission.gallery_data
@@ -147,7 +146,10 @@ def test_read_post_json_formats(tmp_path: Path):
 
 
 def test_submissions_before(arctic_shift: ArcticShift):
-    arctic_shift.session.get.side_effect = [make_response([make_post("b", 200), make_post("a", 100)]), make_response([])]
+    arctic_shift.session.get.side_effect = [
+        make_response([make_post("b", 200), make_post("a", 100)]),
+        make_response([]),
+    ]
     assert [s.id for s in arctic_shift.submissions(author="someone", before=250)] == ["b", "a"]
     first, second = (call.kwargs["params"] for call in arctic_shift.session.get.call_args_list)
     assert first["before"] == 250

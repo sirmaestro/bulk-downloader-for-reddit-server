@@ -7,13 +7,12 @@ from collections import Counter
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import praw
 import pytest
 
 from bdfr.arctic_shift import ArcticShift
 from bdfr.configuration import Configuration
 from bdfr.download_filter import DownloadFilter
-from bdfr.downloader import RedditDownloader
+from bdfr.downloader import Downloader
 from bdfr.file_name_formatter import FileNameFormatter
 from bdfr.resource import Resource
 
@@ -21,8 +20,14 @@ CONTENT = {"https://i.redd.it/a.jpg": b"a", "https://i.redd.it/copy.jpg": b"a", 
 
 
 def post(post_id: str, url: str, **extra) -> dict:
-    data = {"id": post_id, "title": f"title {post_id}", "author": "someone", "subreddit": "test",
-            "created_utc": 1792454400, "url": url}
+    data = {
+        "id": post_id,
+        "title": f"title {post_id}",
+        "author": "someone",
+        "subreddit": "test",
+        "created_utc": 1792454400,
+        "url": url,
+    }
     return {**data, **extra}
 
 
@@ -33,8 +38,10 @@ def post(post_id: str, url: str, **extra) -> dict:
         (post("abc1234", "https://www.reddit.com/gallery/abc1234"), "gallery"),
         (post("abc1234", "https://www.reddit.com/gallery/abc1234", gallery_data={"items": []}), None),
         (post("abc1234", "https://v.redd.it/xyz"), None),
-        (post("abc1234", "https://www.reddit.com/gallery/abc1234", bdfr_note="Reddit asked to log in"),
-         "gallery (Reddit asked to log in)"),
+        (
+            post("abc1234", "https://www.reddit.com/gallery/abc1234", bdfr_note="Reddit asked to log in"),
+            "gallery (Reddit asked to log in)",
+        ),
         (post("abc1234", "https://www.reddit.com/r/test/comments/abc1234/title/"), "self post"),
         (post("abc1234", "https://www.reddit.com/r/test/comments/zzz9999/other/"), "crosspost or link to another"),
         ({"id": "abc1234"}, "no URL"),
@@ -49,8 +56,8 @@ def test_needs_lookup_says_why(data: dict, expected):
         assert reason.startswith(expected)
 
 
-def test_lookups_are_logged_by_post(reddit_instance: praw.Reddit, caplog: pytest.LogCaptureFixture):
-    client = ArcticShift(reddit_instance)
+def test_lookups_are_logged_by_post(caplog: pytest.LogCaptureFixture):
+    client = ArcticShift()
     client.MIN_REQUEST_INTERVAL = 0
     client.session = MagicMock()
     gallery = post("g111111", "https://www.reddit.com/gallery/g111111")
@@ -75,14 +82,14 @@ class FakeDownloader:
     def __init__(self, submission, args):
         self.submission = submission
 
-    def find_resources(self, authenticator=None) -> list[Resource]:
+    def find_resources(self) -> list[Resource]:
         url = self.submission.url
         return [Resource(self.submission, url, lambda _params: CONTENT[url], ".jpg")]
 
 
-def make_downloader(tmp_path: Path, posts: list[dict], reddit_instance: praw.Reddit) -> RedditDownloader:
+def make_downloader(tmp_path: Path, posts: list[dict]) -> Downloader:
     """A downloader that keeps hashes in memory and downloads with FakeDownloader"""
-    downloader = RedditDownloader.__new__(RedditDownloader)
+    downloader = Downloader.__new__(Downloader)
     downloader.args = Configuration()
     downloader.args.no_dupes = True
     downloader.args.min_score = 5
@@ -90,17 +97,16 @@ def make_downloader(tmp_path: Path, posts: list[dict], reddit_instance: praw.Red
     downloader.excluded_submission_ids = set()
     downloader.download_filter = DownloadFilter([], [])
     downloader.file_name_formatter = FileNameFormatter("{POSTID}_{TITLE}", "", "ISO", "linux")
-    downloader.authenticator = None
     downloader.master_hash_list, downloader.master_file_list, downloader.master_url_list = {}, {}, {}
-    downloader._RedditConnector__hash_db_conn = None
+    downloader._hash_db = None
     downloader.progress_callback = None
-    client = ArcticShift(reddit_instance)
+    client = ArcticShift()
     downloader.arctic_shift = client
-    downloader.reddit_lists = [iter([client.to_submission(data) for data in posts])]
+    downloader.listings = [iter([client.to_submission(data) for data in posts])]
     return downloader
 
 
-def test_one_line_per_post(tmp_path: Path, reddit_instance: praw.Reddit, caplog: pytest.LogCaptureFixture):
+def test_one_line_per_post(tmp_path: Path, caplog: pytest.LogCaptureFixture):
     posts = [
         post("aaa1111", "https://i.redd.it/a.jpg", score=10),
         post("bbb2222", "https://i.redd.it/copy.jpg", score=10),
@@ -108,7 +114,7 @@ def test_one_line_per_post(tmp_path: Path, reddit_instance: praw.Reddit, caplog:
     ]
     with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=FakeDownloader):
         with caplog.at_level(logging.INFO, logger="bdfr.downloader"):
-            make_downloader(tmp_path, posts, reddit_instance).download()
+            make_downloader(tmp_path, posts).download()
         lines = [r.getMessage() for r in caplog.records if r.name == "bdfr.downloader" and r.levelno == logging.INFO]
         assert lines == [
             "#1 aaa1111 in r/test [FakeDownloader]: new - 1 file written",
@@ -120,18 +126,18 @@ def test_one_line_per_post(tmp_path: Path, reddit_instance: praw.Reddit, caplog:
 
         caplog.clear()
         with caplog.at_level(logging.INFO, logger="bdfr.downloader"):
-            make_downloader(tmp_path, posts[:1], reddit_instance).download()
+            make_downloader(tmp_path, posts[:1]).download()
     # Known from its ID in the folder's file names, before anything is requested
     assert "#1 aaa1111 in r/test: already downloaded - files with its ID already in the folder" in caplog.text
 
 
-def test_given_posts_ignore_stop_at_existing(tmp_path: Path, reddit_instance: praw.Reddit):
+def test_given_posts_ignore_stop_at_existing(tmp_path: Path):
     posts = [post(f"p{i}00000", "https://i.redd.it/a.jpg", score=10) for i in range(4)]
-    downloader = make_downloader(tmp_path, posts, reddit_instance)
+    downloader = make_downloader(tmp_path, posts)
     downloader.args.stop_at_existing = 1
-    downloader.post_list = downloader.reddit_lists[0]
+    downloader.post_list = downloader.listings[0]
     listing = [downloader.arctic_shift.to_submission(data) for data in posts]
-    downloader.reddit_lists.append(iter(listing))
+    downloader.listings.append(iter(listing))
     seen = []
     downloader.progress_callback = lambda post_id, result, _label: seen.append((post_id, result))
     with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=FakeDownloader):
@@ -143,7 +149,7 @@ def test_given_posts_ignore_stop_at_existing(tmp_path: Path, reddit_instance: pr
 class SlowDownloader(FakeDownloader):
     """Downloads that finish in reverse order, to show results are still reported in listing order"""
 
-    def find_resources(self, authenticator=None) -> list[Resource]:
+    def find_resources(self) -> list[Resource]:
         url = self.submission.url
         delay = {"a": 0.3, "copy": 0.2}.get(url.rsplit("/", 1)[1].split(".")[0], 0.1)
 
@@ -155,13 +161,13 @@ class SlowDownloader(FakeDownloader):
 
 
 @pytest.mark.parametrize("parallel", (1, 4))
-def test_parallel_downloads_report_in_order(parallel: int, tmp_path: Path, reddit_instance: praw.Reddit):
+def test_parallel_downloads_report_in_order(parallel: int, tmp_path: Path):
     posts = [
         post("aaa1111", "https://i.redd.it/a.jpg", score=10),
         post("bbb2222", "https://i.redd.it/copy.jpg", score=10),  # same content as aaa1111
         post("ccc3333", "https://i.redd.it/c.jpg", score=10),
     ]
-    downloader = make_downloader(tmp_path, posts, reddit_instance)
+    downloader = make_downloader(tmp_path, posts)
     downloader.args.parallel = parallel
     seen = []
     downloader.progress_callback = lambda post_id, result, _label: seen.append((post_id, result))
@@ -171,22 +177,27 @@ def test_parallel_downloads_report_in_order(parallel: int, tmp_path: Path, reddi
     results = dict(seen)
     # The two posts with the same content are downloaded at once, but only one of them is written
     assert sorted((results["aaa1111"], results["bbb2222"]), key=str) == [False, None]
-    labels = {post_id: RedditDownloader.result_label(result, {"files": Counter(duplicate=result is None),
-                                                               "skip_reason": None}) for post_id, result in seen}
+    labels = {
+        post_id: Downloader.result_label(result, {"files": Counter(duplicate=result is None), "skip_reason": None})
+        for post_id, result in seen
+    }
     assert sorted(labels.values()) == ["duplicate", "new", "new"]
     assert results["ccc3333"] is False
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
-        [f"{'aaa1111' if results['aaa1111'] is False else 'bbb2222'}_title "
-         f"{'aaa1111' if results['aaa1111'] is False else 'bbb2222'}.jpg", "ccc3333_title ccc3333.jpg"]
+        [
+            f"{'aaa1111' if results['aaa1111'] is False else 'bbb2222'}_title "
+            f"{'aaa1111' if results['aaa1111'] is False else 'bbb2222'}.jpg",
+            "ccc3333_title ccc3333.jpg",
+        ]
     )
 
 
-def test_parallel_stop_at_existing(tmp_path: Path, reddit_instance: praw.Reddit):
+def test_parallel_stop_at_existing(tmp_path: Path):
     posts = [post(f"p{i}00000", f"https://i.redd.it/{i}.jpg", score=10) for i in range(10)]
     for data in posts:
         CONTENT[data["url"]] = data["id"].encode()
         (tmp_path / f"{data['id']}_title {data['id']}.jpg").write_bytes(b"x")
-    downloader = make_downloader(tmp_path, posts, reddit_instance)
+    downloader = make_downloader(tmp_path, posts)
     downloader.args.parallel = 2
     downloader.args.stop_at_existing = 3
     seen = []
@@ -199,13 +210,13 @@ def test_parallel_stop_at_existing(tmp_path: Path, reddit_instance: praw.Reddit)
 
 
 @pytest.mark.parametrize("parallel", (1, 3))
-def test_shared_link_downloaded_once(parallel: int, tmp_path: Path, reddit_instance: praw.Reddit):
+def test_shared_link_downloaded_once(parallel: int, tmp_path: Path):
     """Posts linking the same media (reposts, the same post twice on a page) download it once, in parallel and
     without a hash store"""
     calls = []
 
     class CountingDownloader(FakeDownloader):
-        def find_resources(self, authenticator=None) -> list[Resource]:
+        def find_resources(self) -> list[Resource]:
             url = self.submission.url
 
             def download(_params):
@@ -216,7 +227,7 @@ def test_shared_link_downloaded_once(parallel: int, tmp_path: Path, reddit_insta
             return [Resource(self.submission, url, download, ".jpg")]
 
     posts = [post(f"s{i}11111", "https://i.redd.it/a.jpg", score=10) for i in range(3)]
-    downloader = make_downloader(tmp_path, posts, reddit_instance)
+    downloader = make_downloader(tmp_path, posts)
     downloader.args.parallel = parallel
     seen = []
     downloader.progress_callback = lambda post_id, result, _label: seen.append((post_id, result))
@@ -228,7 +239,7 @@ def test_shared_link_downloaded_once(parallel: int, tmp_path: Path, reddit_insta
     assert sorted(result for _, result in seen) == [False, True, True]
 
 
-def test_same_post_link_needs_no_request(tmp_path: Path, reddit_instance: praw.Reddit):
+def test_same_post_link_needs_no_request(tmp_path: Path):
     """Posts sharing a Redgifs link, written any of its ways, ask the host once per run, and not at all once the link
     is in the hash store"""
     lookups = []
@@ -236,14 +247,17 @@ def test_same_post_link_needs_no_request(tmp_path: Path, reddit_instance: praw.R
     CONTENT[media] = b"video"
 
     class RedgifsLike(FakeDownloader):
-        def find_resources(self, authenticator=None) -> list[Resource]:
+        def find_resources(self) -> list[Resource]:
             lookups.append(self.submission.id)
             return [Resource(self.submission, media, lambda _params: CONTENT[media], ".mp4")]
 
-    links = ["https://redgifs.com/watch/somevideo", "https://www.redgifs.com/watch/SomeVideo",
-             "https://i.redgifs.com/i/somevideo"]
+    links = [
+        "https://redgifs.com/watch/somevideo",
+        "https://www.redgifs.com/watch/SomeVideo",
+        "https://i.redgifs.com/i/somevideo",
+    ]
     posts = [post(f"r{i}11111", link, score=10) for i, link in enumerate(links)]
-    downloader = make_downloader(tmp_path, posts, reddit_instance)
+    downloader = make_downloader(tmp_path, posts)
     downloader.args.keep_hashes = True
     seen = []
     downloader.progress_callback = lambda post_id, result, _label: seen.append(result)
@@ -251,10 +265,12 @@ def test_same_post_link_needs_no_request(tmp_path: Path, reddit_instance: praw.R
         downloader.download()
         assert lookups == ["r011111"]
         assert seen == [False, True, True]
-        assert downloader.master_url_list["https://www.redgifs.com/watch/somevideo"] == downloader.master_url_list[media]
+        assert (
+            downloader.master_url_list["https://www.redgifs.com/watch/somevideo"] == downloader.master_url_list[media]
+        )
 
         # A later run with the same store: a new post with the link is recognised without any request
-        later = make_downloader(tmp_path, [post("r911111", links[0], score=10)], reddit_instance)
+        later = make_downloader(tmp_path, [post("r911111", links[0], score=10)])
         later.args.keep_hashes = True
         later.master_url_list = dict(downloader.master_url_list)
         later.master_hash_list = dict(downloader.master_hash_list)
@@ -263,14 +279,15 @@ def test_same_post_link_needs_no_request(tmp_path: Path, reddit_instance: praw.R
     assert lookups == ["r011111"]
 
 
-def test_galleries_are_not_remembered_by_post_link(tmp_path: Path, reddit_instance: praw.Reddit):
+def test_galleries_are_not_remembered_by_post_link(tmp_path: Path):
     class TwoFiles(FakeDownloader):
-        def find_resources(self, authenticator=None) -> list[Resource]:
-            return [Resource(self.submission, url, lambda _params, u=url: CONTENT[u], ".jpg")
-                    for url in ("https://i.redd.it/a.jpg", "https://i.redd.it/c.jpg")]
+        def find_resources(self) -> list[Resource]:
+            return [
+                Resource(self.submission, url, lambda _params, u=url: CONTENT[u], ".jpg")
+                for url in ("https://i.redd.it/a.jpg", "https://i.redd.it/c.jpg")
+            ]
 
-    downloader = make_downloader(tmp_path, [post("g011111", "https://www.reddit.com/gallery/g011111", score=10)],
-                                 reddit_instance)
+    downloader = make_downloader(tmp_path, [post("g011111", "https://www.reddit.com/gallery/g011111", score=10)])
     downloader.args.keep_hashes = True
     with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=TwoFiles):
         downloader.download()
@@ -278,20 +295,20 @@ def test_galleries_are_not_remembered_by_post_link(tmp_path: Path, reddit_instan
     assert "https://i.redd.it/a.jpg" in downloader.master_url_list
 
 
-def test_known_posts_cost_no_requests(tmp_path: Path, reddit_instance: praw.Reddit):
+def test_known_posts_cost_no_requests(tmp_path: Path):
     """Posts with files in the folder, and posts that were all duplicates, are recognised before any host request"""
     lookups = []
 
     class Counting(FakeDownloader):
-        def find_resources(self, authenticator=None) -> list[Resource]:
+        def find_resources(self) -> list[Resource]:
             lookups.append(self.submission.id)
-            return super().find_resources(authenticator)
+            return super().find_resources()
 
     posts = [
         post("ori1111", "https://i.redd.it/a.jpg", score=10),
         post("dup1111", "https://i.redd.it/copy.jpg", score=10),  # same content, another link
     ]
-    first = make_downloader(tmp_path, posts, reddit_instance)
+    first = make_downloader(tmp_path, posts)
     first.args.keep_hashes = True
     seen = []
     first.progress_callback = lambda post_id, result, label: seen.append(label)
@@ -300,7 +317,7 @@ def test_known_posts_cost_no_requests(tmp_path: Path, reddit_instance: praw.Redd
         assert seen == ["new", "duplicate"] and lookups == ["ori1111", "dup1111"]
         assert "post:dup1111" in first.master_url_list
 
-        later = make_downloader(tmp_path, posts, reddit_instance)
+        later = make_downloader(tmp_path, posts)
         later.args.keep_hashes = True
         later.master_url_list = dict(first.master_url_list)
         later.master_hash_list = dict(first.master_hash_list)
@@ -312,13 +329,13 @@ def test_known_posts_cost_no_requests(tmp_path: Path, reddit_instance: praw.Redd
     assert results == [True, True]
 
 
-def test_media_only(tmp_path: Path, reddit_instance: praw.Reddit):
+def test_media_only(tmp_path: Path):
     posts = [
         post("sel1111", "https://www.reddit.com/r/test/comments/sel1111/x/", score=10, is_self=True),
         post("xpo1111", "https://i.redd.it/a.jpg", score=10, crosspost_parent="t3_orig111"),
         post("med1111", "https://i.redd.it/c.jpg", score=10),
     ]
-    downloader = make_downloader(tmp_path, posts, reddit_instance)
+    downloader = make_downloader(tmp_path, posts)
     downloader.args.media_only = True
     seen = []
     downloader.progress_callback = lambda post_id, result, label: seen.append((post_id, label))

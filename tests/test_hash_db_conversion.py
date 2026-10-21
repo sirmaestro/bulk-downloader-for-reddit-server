@@ -10,17 +10,17 @@ from unittest.mock import patch
 import pytest
 
 from bdfr.configuration import Configuration
-from bdfr.downloader import RedditDownloader
+from bdfr.downloader import Downloader
 
 
-def make_connector(directory: Path) -> RedditDownloader:
+def make_connector(directory: Path) -> Downloader:
     """A connector with only what the hash store conversion needs"""
-    connector = RedditDownloader.__new__(RedditDownloader)
+    connector = Downloader.__new__(Downloader)
     connector.args = Configuration()
     connector.args.keep_hashes = True
     connector.args.keep_hashes_db = True
     connector.download_directory = directory
-    connector._RedditConnector__hash_db_conn = None
+    connector._hash_db = None
     return connector
 
 
@@ -32,8 +32,8 @@ def write_hash_files(directory: Path, urls: bool = True):
         (directory / "hash_url_list.json").write_text(json.dumps({"https://i.redd.it/a.jpg": "h1"}), encoding="utf-8")
 
 
-def convert(connector: RedditDownloader):
-    connector._RedditConnector__check_hash_params()
+def convert(connector: Downloader):
+    connector._check_hash_params()
 
 
 def test_conversion_creates_complete_db(tmp_path: Path):
@@ -102,7 +102,7 @@ def test_database_error_during_conversion_is_not_swallowed(tmp_path: Path):
     rows that later runs trusted"""
     write_hash_files(tmp_path)
     real_connect = sqlite3.connect
-    with patch("bdfr.connector.sqlite3.connect", lambda *a, **k: FailingConnection(real_connect(*a, **k))):
+    with patch("bdfr.hash_store.sqlite3.connect", lambda *a, **k: FailingConnection(real_connect(*a, **k))):
         with pytest.raises(Exception, match="disk I/O error"):
             convert(make_connector(tmp_path))
     assert not (tmp_path / "hashes.sqlite").exists()

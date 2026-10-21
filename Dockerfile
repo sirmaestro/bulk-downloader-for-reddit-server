@@ -1,6 +1,6 @@
 # bdfr serve for an always-on machine: downloads requested by the userscript, plus the weekly Arctic Shift baseline
 # for the users in /config/bdfr/watchlist.yaml. See docker-compose.yml.
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # ffmpeg merges the best video and audio streams (v.redd.it, yt-dlp sites)
 RUN apt-get update \

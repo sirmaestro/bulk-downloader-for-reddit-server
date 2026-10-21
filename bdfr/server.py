@@ -20,12 +20,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
 
-import appdirs
+import platformdirs
 
 from bdfr import __version__
 from bdfr.configuration import Configuration
-from bdfr.connector import RedditConnector
-from bdfr.downloader import RedditDownloader, duplicate_post_key, post_ids_in_names, post_link
+from bdfr.downloader import Downloader, duplicate_post_key, post_ids_in_names, post_link
+from bdfr.hash_store import HashStore
 
 logger = logging.getLogger(__name__)
 
@@ -134,11 +134,11 @@ class DownloadServer:
         for _dirpath, _dirnames, filenames in os.walk(self.root / folder) if supported else ():
             # The ID is a whole "_"-separated part of the name; matching only the requested IDs keeps title words from
             # counting
-            names = (name for name in filenames if not RedditConnector._is_own_file(name))
+            names = (name for name in filenames if not HashStore._is_own_file(name))
             found.update(wanted.intersection(post_ids_in_names(names)))
         # Posts recorded as all duplicates
         duplicates = self._stored_keys(self.root / folder, {duplicate_post_key(i): i for i in wanted - found})
-        # Posts whose link was downloaded before, by any post (reposts); see RedditDownloader._remember_post_link
+        # Posts whose link was downloaded before, by any post (reposts); see Downloader._remember_post_link
         links = payload.get("links")
         by_link = set()
         if isinstance(links, dict):
@@ -246,13 +246,11 @@ class DownloadServer:
     def _run(self, job: Job):
         args = copy.deepcopy(self.base_args)
         args.directory = str(self.root / job.folder)
-        args.source = "arctic-shift"
         args.log = str(self.log_path)
         args.log_rotate_bytes = SERVE_LOG_BYTES
-        for key in ("subreddit", "user", "link", "include_id_file", "post_json", "multireddit"):
+        for key in ("subreddit", "user", "link", "include_id_file", "post_json"):
             setattr(args, key, [])
-        args.submitted = args.saved = args.upvoted = args.subscribed = False
-        args.search = None
+        args.submitted = False
         post_file = None
         if job.posts:
             # Every given post is checked (--stop-at-existing only applies to listings), so a run of existing posts
@@ -280,7 +278,7 @@ class DownloadServer:
         # The outcome is published once the job is cleaned up, so whoever sees it finished sees it complete
         state, error = "failed", None
         try:
-            downloader = RedditDownloader(args)
+            downloader = Downloader(args)
             # Repeated once the downloader's log file is open, so each job's log says what it was for and how
             logger.debug(f"Job {job.id}: {self._describe(job)}; {self._options(args)}")
             downloader.progress_callback = job.record
@@ -318,8 +316,18 @@ class DownloadServer:
     @staticmethod
     def _options(args: Configuration) -> str:
         """The download options that change what a job does"""
-        flags = [name for name in ("no_dupes", "search_existing", "keep_hashes", "keep_hashes_db", "make_hard_links",
-                                   "rename_existing") if getattr(args, name, False)]
+        flags = [
+            name
+            for name in (
+                "no_dupes",
+                "search_existing",
+                "keep_hashes",
+                "keep_hashes_db",
+                "make_hard_links",
+                "rename_existing",
+            )
+            if getattr(args, name, False)
+        ]
         parts = [f"--{name.replace('_', '-')}" for name in flags]
         parts.append(f"--parallel {args.parallel}")
         if args.stop_at_existing:
@@ -328,7 +336,8 @@ class DownloadServer:
         for name in ("min_score", "max_score", "skip_domain", "skip", "skip_subreddit", "disable_module"):
             value = getattr(args, name, None)
             if value:
-                parts.append(f"--{name.replace('_', '-')} {value if not isinstance(value, (list, set)) else ','.join(sorted(value))}")
+                shown = ",".join(sorted(value)) if isinstance(value, (list, set)) else value
+                parts.append(f"--{name.replace('_', '-')} {shown}")
         return " ".join(parts)
 
     @staticmethod
@@ -428,7 +437,7 @@ def load_token(config_directory: Path) -> str:
 def run_server(base_args: Configuration, port: int):
     root = Path(base_args.directory).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
-    config_directory = Path(appdirs.user_config_dir("bdfr", "BDFR"))
+    config_directory = Path(platformdirs.user_config_dir("bdfr", "BDFR"))
     token = load_token(config_directory)
     server = DownloadServer(base_args, root, token, config_directory / "serve_log.txt")
     from bdfr.scheduler import BaselineScheduler

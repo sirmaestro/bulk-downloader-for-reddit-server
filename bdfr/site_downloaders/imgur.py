@@ -5,45 +5,52 @@ import json
 import logging
 import re
 import urllib.request
-from typing import Optional
-
-from praw.models import Submission
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
+from bdfr.post import Post
 from bdfr.resource import Resource
-from bdfr.site_authenticator import SiteAuthenticator
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__.replace("site_downloaders", ""))
 
 
 class Imgur(BaseDownloader):
-    def __init__(self, post: Submission, args: Configuration):
+    def __init__(self, post: Post, args: Configuration):
         super().__init__(post, args)
         self.raw_data = {}
 
-    def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> list[Resource]:
+    def find_resources(self) -> list[Resource]:
         if re.search(r".*/(i.|)imgur.com/[^/]*(.jpg|.jpeg|.png|.mp4)(\?1|)$", self.post.url):
             self.raw_data["link"] = self.post.url.replace("http://", "https://")
         else:
             try:
                 self.raw_data = self._get_data(self.post.url)
             except Exception as e:
-                if (self.args.imgur_fix404 and
-                        "responded with 404" in str(e) and
-                        re.search(r".*(.gif|.gifv)$", self.post.url)):
+                if (
+                    self.args.imgur_fix404
+                    and "responded with 404" in str(e)
+                    and re.search(r".*(.gif|.gifv)$", self.post.url)
+                ):
                     logger.debug(f"{e}")
                     out = []
                     if re.search(r".*(.gifv)$", self.post.url):
                         with urllib.request.urlopen(self.post.url[:-1], timeout=30) as response:
                             magic = response.read(3)
-                        if not self.args.imgur_originals or magic ==b"\xff\xd8\xff":
+                        if not self.args.imgur_originals or magic == b"\xff\xd8\xff":
                             logger.debug(f"using {self.post.url[:-4]}mp4")
-                            out.append(Resource(self.post, self.post.url[:-4] + "mp4", Resource.retry_download(self.post.url[:-4] + "mp4")))
+                            out.append(
+                                Resource(
+                                    self.post,
+                                    self.post.url[:-4] + "mp4",
+                                    Resource.retry_download(self.post.url[:-4] + "mp4"),
+                                )
+                            )
                         else:
                             logger.debug(f"using {self.post.url[:-1]}")
-                            out.append(Resource(self.post, self.post.url[:-1], Resource.retry_download(self.post.url[:-1])))
+                            out.append(
+                                Resource(self.post, self.post.url[:-1], Resource.retry_download(self.post.url[:-1]))
+                            )
                     else:
                         logger.debug(f"using {self.post.url}")
                         out.append(Resource(self.post, self.post.url, Resource.retry_download(self.post.url)))
@@ -88,7 +95,7 @@ class Imgur(BaseDownloader):
             res = Imgur.retrieve_url(link, headers=headers)
         except ResourceNotFound as e:
             raise SiteDownloaderError(f"Could not retrieve data: {e}")
-        
+
         try:
             image_dict = json.loads(res.text)
         except json.JSONDecodeError as e:

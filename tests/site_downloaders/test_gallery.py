@@ -3,7 +3,6 @@
 
 from unittest.mock import MagicMock
 
-import praw
 import pytest
 
 from bdfr.configuration import Configuration
@@ -50,76 +49,10 @@ def test_gallery_get_links(test_ids: list[dict], expected: set[str]):
     assert set(results) == expected
 
 
-@pytest.mark.online
-@pytest.mark.reddit
 @pytest.mark.parametrize(
-    ("test_submission_id", "expected_hashes"),
-    (
-        (
-            "m6lvrh",
-            {
-                "5c42b8341dd56eebef792e86f3981c6a",
-                "8f38d76da46f4057bf2773a778e725ca",
-                "f5776f8f90491c8b770b8e0a6bfa49b3",
-                "fa1a43c94da30026ad19a9813a0ed2c2",
-            },
-        ),
-        (
-            "ljyy27",
-            {
-                "359c203ec81d0bc00e675f1023673238",
-                "79262fd46bce5bfa550d878a3b898be4",
-                "808c35267f44acb523ce03bfa5687404",
-                "ec8b65bdb7f1279c4b3af0ea2bbb30c3",
-            },
-        ),
-        (
-            "obkflw",
-            {
-                "65163f685fb28c5b776e0e77122718be",
-                "2a337eb5b13c34d3ca3f51b5db7c13e9",
-            },
-        ),
-        (
-            "rb3ub6",
-            {  # patreon post
-                "748a976c6cedf7ea85b6f90e7cb685c7",
-                "839796d7745e88ced6355504e1f74508",
-                "bcdb740367d0f19f97a77e614b48a42d",
-                "0f230b8c4e5d103d35a773fab9814ec3",
-                "e5192d6cb4f84c4f4a658355310bf0f9",
-                "91cbe172cd8ccbcf049fcea4204eb979",
-            },
-        ),
-    ),
+    ("removed", "message"),
+    (("reddit", "removed by Reddit"), ("deleted", "deleted by its author"), (None, "No images found")),
 )
-def test_gallery_download(test_submission_id: str, expected_hashes: set[str], reddit_instance: praw.Reddit):
-    test_submission = reddit_instance.submission(id=test_submission_id)
-    gallery = Gallery(test_submission, Configuration())
-    results = gallery.find_resources()
-    [res.download() for res in results]
-    hashes = [res.hash.hexdigest() for res in results]
-    assert set(hashes) == expected_hashes
-
-
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    "test_id",
-    (
-        "n0pyzp",
-        "nxyahw",
-    ),
-)
-def test_gallery_download_raises_right_error(test_id: str, reddit_instance: praw.Reddit):
-    test_submission = reddit_instance.submission(id=test_id)
-    gallery = Gallery(test_submission, Configuration())
-    with pytest.raises(SiteDownloaderError):
-        gallery.find_resources()
-
-
-@pytest.mark.parametrize(("removed", "message"), (("reddit", "removed by Reddit"), ("deleted", "deleted by its author"),
-                                                  (None, "No images found")))
 def test_gallery_without_data_says_why(removed, message):
     post = MagicMock(spec=["id", "gallery_data", "crosspost_parent_list", "removed_by_category"])
     post.id = "abc1234"

@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 class Configuration(Namespace):
     def __init__(self):
         super(Configuration, self).__init__()
-        self.authenticate = False
         self.config = None
         self.opts: Optional[str] = None
         self.directory: str = "."
@@ -33,10 +32,7 @@ class Configuration(Namespace):
         self.log: Optional[str] = None
         self.make_hard_links = False
         self.max_wait_time = None
-        self.multireddit: list[str] = []
         self.no_dupes: bool = False
-        self.saved: bool = False
-        self.search: Optional[str] = None
         self.search_existing: bool = False
         self.keep_hashes: bool = False
         self.keep_hashes_db: bool = False
@@ -57,8 +53,6 @@ class Configuration(Namespace):
         # serve only: the address to listen on (default 127.0.0.1)
         self.host: Optional[str] = None
         self.rename_existing: bool = False
-        # None picks the command's default: arctic-shift for download, reddit for archive and clone
-        self.source: Optional[str] = None
         self.post_json: list[str] = []
         self.skip: list[str] = []
         self.skip_domain: list[str] = []
@@ -69,23 +63,13 @@ class Configuration(Namespace):
         self.max_score_ratio = None
         self.imgur_originals: bool = False
         self.imgur_fix404: bool = False
-        self.sort: str = "hot"
         self.submitted: bool = False
-        self.subscribed: bool = False
         self.subreddit: list[str] = []
         self.time: str = "all"
         self.time_format = None
-        self.upvoted: bool = False
         self.fail_fast: bool = False
         self.user: list[str] = []
         self.verbose: int = 0
-
-        # Archiver-specific options
-        self.all_comments = False
-        self.no_comments = False
-        self.format = "json"
-        self.comment_context: bool = False
-        self.ignore_score: bool = False
 
     def process_click_arguments(self, context: click.Context):
         if context.params.get("opts") is not None:

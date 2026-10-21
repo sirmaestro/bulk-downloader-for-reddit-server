@@ -212,11 +212,13 @@ class BaselineScheduler:
             users = []
             for user in self.users:
                 state = self.state.get(user["name"].lower(), {})
-                users.append({
-                    "name": user["name"],
-                    "folder": user["folder"],
-                    "last_success": state.get("last_success"),
-                    "last_error": state.get("last_error"),
-                    "next_check": self._next_check(state),
-                })
+                users.append(
+                    {
+                        "name": user["name"],
+                        "folder": user["folder"],
+                        "last_success": state.get("last_success"),
+                        "last_error": state.get("last_error"),
+                        "next_check": self._next_check(state),
+                    }
+                )
             return {"enabled": True, "users": users, "error": self.error, **self.settings}

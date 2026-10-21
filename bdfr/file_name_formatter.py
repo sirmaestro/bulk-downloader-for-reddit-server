@@ -7,11 +7,12 @@ import platform
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 
 import emoji
-from praw.models import Comment, Submission
+
 from bdfr.exceptions import BulkDownloaderException
+from bdfr.post import Post
 from bdfr.resource import Resource
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class FileNameFormatter:
         directory_format_string: str,
         time_format_string: str,
         restriction_scheme: Optional[str] = None,
-        filename_character_set = None
+        filename_character_set=None,
     ):
         if not self.validate_string(file_format_string):
             raise BulkDownloaderException(f'"{file_format_string}" is not a valid format string')
@@ -50,13 +51,10 @@ class FileNameFormatter:
             self.max_path = self.find_max_path_length()
         self.filename_character_set = filename_character_set
 
-    def _format_name(self, submission: Union[Comment, Submission], format_string: str) -> str:
-        if isinstance(submission, Submission):
-            attributes = self._generate_name_dict_from_submission(submission)
-        elif isinstance(submission, Comment):
-            attributes = self._generate_name_dict_from_comment(submission)
-        else:
+    def _format_name(self, submission: Post, format_string: str) -> str:
+        if not isinstance(submission, Post):
             raise BulkDownloaderException(f"Cannot name object {type(submission).__name__}")
+        attributes = self._generate_name_dict_from_submission(submission)
         result = format_string
         for key in attributes.keys():
             if re.search(rf"(?i).*{{{key}}}.*", result):
@@ -85,11 +83,11 @@ class FileNameFormatter:
                 in_string = in_string.replace(match, converted_match)
         return in_string
 
-    def _generate_name_dict_from_submission(self, submission: Submission) -> dict:
+    def _generate_name_dict_from_submission(self, submission: Post) -> dict:
         submission_attributes = {
             "title": submission.title,
-            "subreddit": submission.subreddit.display_name,
-            "redditor": submission.author.name if submission.author else "DELETED",
+            "subreddit": submission.subreddit,
+            "redditor": submission.author or "DELETED",
             "postid": submission.id,
             "upvotes": submission.score,
             "flair": submission.link_flair_text,
@@ -103,18 +101,6 @@ class FileNameFormatter:
             return input_time.isoformat()
         else:
             return input_time.strftime(self.time_format_string)
-
-    def _generate_name_dict_from_comment(self, comment: Comment) -> dict:
-        comment_attributes = {
-            "title": comment.submission.title,
-            "subreddit": comment.subreddit.display_name,
-            "redditor": comment.author.name if comment.author else "DELETED",
-            "postid": comment.id,
-            "upvotes": comment.score,
-            "flair": "",
-            "date": self._convert_timestamp(comment.created_utc),
-        }
-        return comment_attributes
 
     def format_path(
         self,
@@ -233,7 +219,7 @@ class FileNameFormatter:
 
     @staticmethod
     def _strip_emojis(input_string: str) -> str:
-        result = emoji.replace_emoji(input_string, replace='')
+        result = emoji.replace_emoji(input_string, replace="")
         return result
 
     @staticmethod

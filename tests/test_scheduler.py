@@ -56,7 +56,7 @@ def clock() -> Clock:
 def serve(tmp_path: Path):
     FakeDownloader.runs = []
     FakeDownloader.errors_to_report = []
-    with patch("bdfr.server.RedditDownloader", FakeDownloader):
+    with patch("bdfr.server.Downloader", FakeDownloader):
         yield DownloadServer(Configuration(), tmp_path / "root", "token", tmp_path / "serve_log.txt")
 
 
@@ -125,8 +125,13 @@ def test_settings_and_folders(serve, tmp_path, clock):
     tick(scheduler, serve)
     assert FakeDownloader.runs[-1].listing_after == START - DAY
     assert scheduler.snapshot()["users"] == [
-        {"name": "someone", "folder": "Some Folder", "last_success": START + 2 * DAY, "last_error": None,
-         "next_check": START + 4 * DAY}
+        {
+            "name": "someone",
+            "folder": "Some Folder",
+            "last_success": START + 2 * DAY,
+            "last_error": None,
+            "next_check": START + 4 * DAY,
+        }
     ]
 
 

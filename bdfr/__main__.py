@@ -8,50 +8,34 @@ from pathlib import Path
 import click
 
 from bdfr import __version__
-from bdfr.archiver import Archiver
-from bdfr.cloner import RedditCloner
-from bdfr.completion import Completion
 from bdfr.configuration import Configuration
-from bdfr.downloader import RedditDownloader
+from bdfr.downloader import Downloader
 from bdfr.renamer import Renamer, rename_directory
 from bdfr.server import DEFAULT_PORT, run_server
 
 logger = logging.getLogger()
 
-_REDDIT_API_ONLY = "Deprecated: needs Reddit's API, which no longer grants access to personal scripts."
-
 _common_options = [
     click.argument("directory", type=str),
-    click.option("--authenticate", is_flag=True, default=None, help=_REDDIT_API_ONLY),
     click.option("--config", type=str, default=None),
     click.option("--disable-module", multiple=True, default=None, type=str),
     click.option("--exclude-id", default=None, multiple=True),
     click.option("--exclude-id-file", default=None, multiple=True),
     click.option("--file-scheme", default=None, type=str),
     click.option("--filename-restriction-scheme", type=click.Choice(("linux", "windows")), default=None),
-    click.option("--filename-character-set", type=click.Choice(("ascii", "unicode", "unicode_no_emojis")), default=None),
+    click.option(
+        "--filename-character-set", type=click.Choice(("ascii", "unicode", "unicode_no_emojis")), default=None
+    ),
     click.option("--folder-scheme", default=None, type=str),
     click.option("--ignore-user", type=str, multiple=True, default=None),
     click.option("--include-id-file", multiple=True, default=None),
     click.option("--log", type=str, default=None),
     click.option("--opts", type=str, default=None),
-    click.option("--saved", is_flag=True, default=None, help=_REDDIT_API_ONLY),
-    click.option("--search", default=None, type=str, help=_REDDIT_API_ONLY),
     click.option("--submitted", is_flag=True, default=None),
-    click.option("--subscribed", is_flag=True, default=None, help=_REDDIT_API_ONLY),
     click.option("--time-format", type=str, default=None),
-    click.option("--upvoted", is_flag=True, default=None, help=_REDDIT_API_ONLY),
     click.option("--fail-fast", is_flag=True, default=None),
     click.option("-L", "--limit", default=None, type=int),
     click.option("-l", "--link", multiple=True, default=None, type=str),
-    click.option("-m", "--multireddit", multiple=True, default=None, type=str, help=_REDDIT_API_ONLY),
-    click.option(
-        "-S",
-        "--sort",
-        type=click.Choice(("hot", "top", "new", "controversial", "rising", "relevance")),
-        default=None,
-        help=f"{_REDDIT_API_ONLY} Arctic Shift listings are always newest first.",
-    ),
     click.option("-s", "--subreddit", multiple=True, default=None, type=str),
     click.option("-t", "--time", type=click.Choice(("all", "hour", "day", "week", "month", "year")), default=None),
     click.option("-u", "--user", type=str, multiple=True, default=None),
@@ -85,12 +69,6 @@ _downloader_options = [
         default=None,
         help="Rename already downloaded files of a post to the current --file-scheme when they are found again.",
     ),
-    click.option(
-        "--source",
-        type=click.Choice(("arctic-shift", "reddit")),
-        default=None,
-        help="Where posts are read from (default: arctic-shift). 'reddit' is deprecated.",
-    ),
     click.option("--post-json", multiple=True, default=None, type=str),
     click.option("--skip", default=None, multiple=True),
     click.option("--skip-domain", default=None, multiple=True),
@@ -101,14 +79,6 @@ _downloader_options = [
     click.option("--max-score-ratio", type=float, default=None),
     click.option("--imgur-originals", is_flag=True, default=None),
     click.option("--imgur-fix404", is_flag=True, default=None),
-]
-
-_archiver_options = [
-    click.option("--all-comments", is_flag=True, default=None),
-    click.option("--no-comments", is_flag=True, default=None),
-    click.option("--comment-context", is_flag=True, default=None),
-    click.option("--ignore-score", is_flag=True, default=None),
-    click.option("-f", "--format", type=click.Choice(("xml", "json", "yaml")), default=None),
 ]
 
 
@@ -141,7 +111,8 @@ def _check_version(context, param, value):
     help="Show version and exit.",
 )
 def cli():
-    """BDFR is used to download and archive content from Reddit."""
+    """BDFR downloads the media of Reddit posts, read from the Arctic Shift archive, into folders kept free of
+    duplicates. `bdfr serve` runs downloads for the Tampermonkey script and keeps watched users' folders complete."""
     pass
 
 
@@ -151,59 +122,16 @@ def cli():
 @click.help_option("-h", "--help")
 @click.pass_context
 def cli_download(context: click.Context, **_):
-    """Used to download content posted to Reddit."""
+    """Downloads the media of Reddit posts (users' and subreddits' listings, links, --post-json files)."""
     config = Configuration()
     config.process_click_arguments(context)
     silence_module_loggers()
     stream = make_console_logging_handler(config.verbose)
     try:
-        reddit_downloader = RedditDownloader(config, [stream])
-        reddit_downloader.download()
+        downloader = Downloader(config, [stream])
+        downloader.download()
     except Exception:
         logger.exception("Downloader exited unexpectedly")
-        raise
-    else:
-        logger.info("Program complete")
-
-
-@cli.command("archive", deprecated=True)
-@_add_options(_common_options)
-@_add_options(_archiver_options)
-@click.help_option("-h", "--help")
-@click.pass_context
-def cli_archive(context: click.Context, **_):
-    """Used to archive post data from Reddit. Needs Reddit's API."""
-    config = Configuration()
-    config.process_click_arguments(context)
-    silence_module_loggers()
-    stream = make_console_logging_handler(config.verbose)
-    try:
-        reddit_archiver = Archiver(config, [stream])
-        reddit_archiver.download()
-    except Exception:
-        logger.exception("Archiver exited unexpectedly")
-        raise
-    else:
-        logger.info("Program complete")
-
-
-@cli.command("clone", deprecated=True)
-@_add_options(_common_options)
-@_add_options(_archiver_options)
-@_add_options(_downloader_options)
-@click.help_option("-h", "--help")
-@click.pass_context
-def cli_clone(context: click.Context, **_):
-    """Combines archive and download commands. Needs Reddit's API."""
-    config = Configuration()
-    config.process_click_arguments(context)
-    silence_module_loggers()
-    stream = make_console_logging_handler(config.verbose)
-    try:
-        reddit_scraper = RedditCloner(config, [stream])
-        reddit_scraper.download()
-    except Exception:
-        logger.exception("Scraper exited unexpectedly")
         raise
     else:
         logger.info("Program complete")
@@ -230,7 +158,10 @@ SERVE_DEFAULTS = {
     is_flag=True,
     default=False,
     help="Don't apply serve's defaults ("
-    + " ".join(f"--{k.replace('_', '-')}" + ("" if v is True else f" {v}" if isinstance(v, int) else f" '{v}'") for k, v in SERVE_DEFAULTS.items())
+    + " ".join(
+        f"--{k.replace('_', '-')}" + ("" if v is True else f" {v}" if isinstance(v, int) else f" '{v}'")
+        for k, v in SERVE_DEFAULTS.items()
+    )
     + "); use the download command's.",
 )
 @click.option(
@@ -302,9 +233,19 @@ def cli_serve(context: click.Context, **_):
 @click.option("--dry-run", is_flag=True, help="Only show what would be renamed.")
 @click.option("-v", "--verbose", count=True)
 @click.help_option("-h", "--help")
-def cli_rename(directory: str, file_scheme: str, from_scheme: str, time_format: str, filename_restriction_scheme,
-               filename_character_set, build_hash_db: bool, no_subfolders: bool, folder_is_user: bool,
-               dry_run: bool, verbose: int):
+def cli_rename(
+    directory: str,
+    file_scheme: str,
+    from_scheme: str,
+    time_format: str,
+    filename_restriction_scheme,
+    filename_character_set,
+    build_hash_db: bool,
+    no_subfolders: bool,
+    folder_is_user: bool,
+    dry_run: bool,
+    verbose: int,
+):
     """Renames downloaded files in DIRECTORY to a new file scheme, offline.
 
     Uses only the existing file names, modified times and hash store; makes no network requests."""
@@ -317,30 +258,6 @@ def cli_rename(directory: str, file_scheme: str, from_scheme: str, time_format: 
     if build_hash_db:
         summary += f", {result['hashed']} {'to hash' if dry_run else 'hashed'}"
     logger.info(summary)
-
-
-@cli.command("completion")
-@click.argument("shell", type=click.Choice(("all", "bash", "fish", "zsh"), case_sensitive=False), default="all")
-@click.help_option("-h", "--help")
-@click.option("-u", "--uninstall", is_flag=True, default=False, help="Uninstall completion")
-def cli_completion(shell: str, uninstall: bool):
-    """\b
-    Installs shell completions for BDFR.
-    Options: all, bash, fish, zsh
-    Default: all"""
-    shell = shell.lower()
-    if sys.platform == "win32":
-        print("Completions are not currently supported on Windows.")
-        return
-    if uninstall and click.confirm(f"Would you like to uninstall {shell} completions for BDFR"):
-        Completion(shell).uninstall()
-        return
-    if shell not in ("all", "bash", "fish", "zsh"):
-        print(f"{shell} is not a valid option.")
-        print("Options: all, bash, fish, zsh")
-        return
-    if click.confirm(f"Would you like to install {shell} completions for BDFR"):
-        Completion(shell).install()
 
 
 def make_console_logging_handler(verbosity: int) -> logging.StreamHandler:
@@ -366,8 +283,6 @@ def make_console_logging_handler(verbosity: int) -> logging.StreamHandler:
 
 
 def silence_module_loggers():
-    logging.getLogger("praw").setLevel(logging.CRITICAL)
-    logging.getLogger("prawcore").setLevel(logging.CRITICAL)
     logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 
 

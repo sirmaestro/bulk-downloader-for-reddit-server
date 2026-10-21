@@ -14,7 +14,10 @@ from bdfr.site_downloaders.gfycat import Gfycat
     (
         ("https://gfycat.com/definitivecaninecrayfish", "https://www.redgifs.com/watch/definitivecaninecrayfish"),
         ("https://gfycat.com/WearyComposedHairstreak", "https://www.redgifs.com/watch/wearycomposedhairstreak"),
-        ("https://gfycat.com/WearyComposedHairstreak-some-title", "https://www.redgifs.com/watch/wearycomposedhairstreak"),
+        (
+            "https://gfycat.com/WearyComposedHairstreak-some-title",
+            "https://www.redgifs.com/watch/wearycomposedhairstreak",
+        ),
         ("https://gfycat.com/ifr/WearyComposedHairstreak", "https://www.redgifs.com/watch/wearycomposedhairstreak"),
         (
             "https://thumbs.gfycat.com/ComposedWholeBullfrog-size_restricted.gif",

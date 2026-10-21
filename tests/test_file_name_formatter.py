@@ -9,27 +9,24 @@ from pathlib import Path
 from typing import Optional, Union
 from unittest.mock import MagicMock
 
-import praw.models
 import pytest
 
 from bdfr.file_name_formatter import FileNameFormatter
+from bdfr.post import Post
 from bdfr.resource import Resource
-from bdfr.site_downloaders.base_downloader import BaseDownloader
-from bdfr.site_downloaders.fallback_downloaders.ytdlp_fallback import YtdlpFallback
-from bdfr.site_downloaders.self_post import SelfPost
 
 
 @pytest.fixture()
 def submission() -> MagicMock:
     test = MagicMock()
     test.title = "name"
-    test.subreddit.display_name = "randomreddit"
-    test.author.name = "person"
+    test.subreddit = "randomreddit"
+    test.author = "person"
     test.id = "12345"
     test.score = 1000
     test.link_flair_text = "test_flair"
     test.created_utc = datetime(2021, 4, 21, 9, 30, 0).timestamp()
-    test.__class__ = praw.models.Submission
+    test.__class__ = Post
     return test
 
 
@@ -57,11 +54,6 @@ def do_test_path_equality(result: Path, expected: str) -> bool:
     else:
         expected = Path(expected)
     return str(result).endswith(str(expected))  # noqa: FURB123
-
-
-@pytest.fixture(scope="session")
-def reddit_submission(reddit_instance: praw.Reddit) -> praw.models.Submission:
-    return reddit_instance.submission(id="w22m5l")
 
 
 @pytest.mark.parametrize(
@@ -99,119 +91,6 @@ def test_check_format_string_validity(test_string: str, expected: bool):
     assert result == expected
 
 
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    "restriction_scheme",
-    (
-        "windows",
-        "linux",
-        "bla",
-        None,
-    ),
-)
-@pytest.mark.parametrize(
-    ("test_format_string", "expected"),
-    (
-        ("{SUBREDDIT}", "formula1"),
-        ("{REDDITOR}", "Kirsty-Blue"),
-        ("{POSTID}", "w22m5l"),
-        ("{FLAIR}", "Social Media rall"),
-        ("{SUBREDDIT}_{TITLE}", "formula1_George Russel acknowledges the Twitter trend about him"),
-        ("{REDDITOR}_{TITLE}_{POSTID}", "Kirsty-Blue_George Russel acknowledges the Twitter trend about him_w22m5l"),
-    ),
-)
-def test_format_name_real(
-    test_format_string: str,
-    expected: str,
-    reddit_submission: praw.models.Submission,
-    restriction_scheme: Optional[str],
-):
-    test_formatter = FileNameFormatter(test_format_string, "", "", restriction_scheme)
-    result = test_formatter._format_name(reddit_submission, test_format_string)
-    assert do_test_string_equality(result, expected)
-    if restriction_scheme == "windows":
-        assert check_valid_windows_path(result)
-
-
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    ("format_string_directory", "format_string_file", "expected"),
-    (
-        (
-            "{SUBREDDIT}",
-            "{POSTID}",
-            "test/formula1/w22m5l.png",
-        ),
-        (
-            "{SUBREDDIT}",
-            "{TITLE}_{POSTID}",
-            "test/formula1/George Russel acknowledges the Twitter trend about him_w22m5l.png",
-        ),
-        (
-            "{SUBREDDIT}",
-            "{REDDITOR}_{TITLE}_{POSTID}",
-            "test/formula1/Kirsty-Blue_George Russel acknowledges the Twitter trend about him_w22m5l.png",
-        ),
-    ),
-)
-def test_format_full(
-    format_string_directory: str, format_string_file: str, expected: str, reddit_submission: praw.models.Submission
-):
-    test_resource = Resource(reddit_submission, "i.reddit.com/blabla.png", lambda: None)
-    test_formatter = FileNameFormatter(format_string_file, format_string_directory, "ISO")
-    result = test_formatter.format_path(test_resource, Path("test"))
-    assert do_test_path_equality(result, expected)
-
-
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    ("format_string_directory", "format_string_file"),
-    (
-        ("{SUBREDDIT}", "{POSTID}"),
-        ("{SUBREDDIT}", "{UPVOTES}"),
-        ("{SUBREDDIT}", "{UPVOTES}{POSTID}"),
-    ),
-)
-def test_format_full_conform(
-    format_string_directory: str, format_string_file: str, reddit_submission: praw.models.Submission
-):
-    test_resource = Resource(reddit_submission, "i.reddit.com/blabla.png", lambda: None)
-    test_formatter = FileNameFormatter(format_string_file, format_string_directory, "ISO")
-    test_formatter.format_path(test_resource, Path("test"))
-
-
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    ("format_string_directory", "format_string_file", "index", "expected"),
-    (
-        ("{SUBREDDIT}", "{POSTID}", None, "test/formula1/w22m5l.png"),
-        ("{SUBREDDIT}", "{POSTID}", 1, "test/formula1/w22m5l_1.png"),
-        ("{SUBREDDIT}", "{POSTID}", 2, "test/formula1/w22m5l_2.png"),
-        (
-            "{SUBREDDIT}",
-            "{TITLE}_{POSTID}",
-            2,
-            "test/formula1/George Russel acknowledges the Twitter trend about him_w22m5l_2.png",
-        ),
-    ),
-)
-def test_format_full_with_index_suffix(
-    format_string_directory: str,
-    format_string_file: str,
-    index: Optional[int],
-    expected: str,
-    reddit_submission: praw.models.Submission,
-):
-    test_resource = Resource(reddit_submission, "i.reddit.com/blabla.png", lambda: None)
-    test_formatter = FileNameFormatter(format_string_file, format_string_directory, "ISO")
-    result = test_formatter.format_path(test_resource, Path("test"), index)
-    assert do_test_path_equality(result, expected)
-
-
 def test_format_multiple_resources():
     mocks = []
     for _i in range(1, 5):
@@ -219,7 +98,7 @@ def test_format_multiple_resources():
         new_mock.url = "https://example.com/test.png"
         new_mock.extension = ".png"
         new_mock.source_submission.title = "test"
-        new_mock.source_submission.__class__ = praw.models.Submission
+        new_mock.source_submission.__class__ = Post
         mocks.append(new_mock)
     test_formatter = FileNameFormatter("{TITLE}", "", "ISO")
     results = test_formatter.format_resource_paths(mocks, Path())
@@ -297,8 +176,8 @@ def test_shortening_reuses_existing_name_that_lost_the_post_id(submission: Magic
 @pytest.mark.skipif(sys.platform == "win32", reason="Test broken on windows github")
 def test_shorten_filename_real(submission: MagicMock, tmp_path: Path):
     submission.title = "A" * 500
-    submission.author.name = "test"
-    submission.subreddit.display_name = "test"
+    submission.author = "test"
+    submission.subreddit = "test"
     submission.id = "BBBBBB"
     test_resource = Resource(submission, "www.example.com/empty", lambda: None, ".jpeg")
     test_formatter = FileNameFormatter("{REDDITOR}_{TITLE}_{POSTID}", "{SUBREDDIT}", "ISO")
@@ -354,74 +233,6 @@ def test_format_file_name_for_windows(test_string: str, expected: str):
 def test_strip_emojies(test_string: str, expected: str):
     result = FileNameFormatter._strip_emojis(test_string)
     assert result == expected
-
-
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    ("test_submission_id", "expected"),
-    (
-        (
-            "mfuteh",
-            {
-                "title": "Why Do Interviewers Ask Linked List Questions?",
-                "redditor": "mjgardner",
-            },
-        ),
-    ),
-)
-def test_generate_dict_for_submission(test_submission_id: str, expected: dict, reddit_instance: praw.Reddit):
-    test_submission = reddit_instance.submission(id=test_submission_id)
-    test_formatter = FileNameFormatter("{TITLE}", "", "ISO")
-    result = test_formatter._generate_name_dict_from_submission(test_submission)
-    assert all([result.get(key) == expected[key] for key in expected.keys()])
-
-
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    ("test_comment_id", "expected"),
-    (
-        (
-            "gsq0yuw",
-            {
-                "title": "Why Do Interviewers Ask Linked List Questions?",
-                "redditor": "Doctor-Dapper",
-                "postid": "gsq0yuw",
-                "flair": "",
-            },
-        ),
-    ),
-)
-def test_generate_dict_for_comment(test_comment_id: str, expected: dict, reddit_instance: praw.Reddit):
-    test_comment = reddit_instance.comment(id=test_comment_id)
-    test_formatter = FileNameFormatter("{TITLE}", "", "ISO")
-    result = test_formatter._generate_name_dict_from_comment(test_comment)
-    assert all([result.get(key) == expected[key] for key in expected.keys()])
-
-
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    ("test_file_scheme", "test_folder_scheme", "test_comment_id", "expected_name"),
-    (
-        ("{POSTID}", "", "gsoubde", "gsoubde.json"),
-        ("{REDDITOR}_{POSTID}", "", "gsoubde", "DELETED_gsoubde.json"),
-    ),
-)
-def test_format_archive_entry_comment(
-    test_file_scheme: str,
-    test_folder_scheme: str,
-    test_comment_id: str,
-    expected_name: str,
-    tmp_path: Path,
-    reddit_instance: praw.Reddit,
-):
-    test_comment = reddit_instance.comment(id=test_comment_id)
-    test_formatter = FileNameFormatter(test_file_scheme, test_folder_scheme, "ISO")
-    test_entry = Resource(test_comment, "", lambda: None, ".json")
-    result = test_formatter.format_path(test_entry, tmp_path)
-    assert do_test_string_equality(result, expected_name)
 
 
 @pytest.mark.parametrize(
@@ -520,27 +331,3 @@ def test_windows_max_path(tmp_path: Path):
             result = FileNameFormatter.limit_file_name_length(mock, "test" * 100, "_1.png", tmp_path)
             assert len(str(result)) <= 260
             assert len(result.name) <= (260 - len(str(tmp_path)))
-
-
-@pytest.mark.online
-@pytest.mark.reddit
-@pytest.mark.parametrize(
-    ("test_reddit_id", "test_downloader", "expected_names"),
-    (
-        ("gphmnr", YtdlpFallback, {"He has a lot to say today.mp4"}),
-        ("d0oir2", YtdlpFallback, {"Crunk's finest moment. Welcome to the new subreddit!.mp4"}),
-        ("jiecu", SelfPost, {"[deleted by user].txt"}),
-    ),
-)
-def test_name_submission(
-    test_reddit_id: str,
-    test_downloader: type[BaseDownloader],
-    expected_names: set[str],
-    reddit_instance: praw.reddit.Reddit,
-):
-    test_submission = reddit_instance.submission(id=test_reddit_id)
-    test_resources = test_downloader(test_submission).find_resources()
-    test_formatter = FileNameFormatter("{TITLE}", "", "")
-    results = test_formatter.format_resource_paths(test_resources, Path())
-    results = set([r[0].name for r in results])
-    assert results == expected_names

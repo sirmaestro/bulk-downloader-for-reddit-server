@@ -6,12 +6,12 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import praw
 import pytest
 
 from bdfr.configuration import Configuration
-from bdfr.downloader import RedditDownloader
+from bdfr.downloader import Downloader
 from bdfr.file_name_formatter import FileNameFormatter
+from bdfr.post import Post
 from bdfr.resource import Resource
 
 
@@ -33,7 +33,7 @@ def make_submission(post_id: str) -> MagicMock:
 
 def test_renames_same_submission(downloader_mock: MagicMock, tmp_path: Path):
     destination = tmp_path / "2026-10-20_abc123_A title.jpg"
-    assert RedditDownloader._rename_existing(downloader_mock, "hash", destination, make_submission("abc123"))
+    assert Downloader._rename_existing(downloader_mock, "hash", destination, make_submission("abc123"))
     assert destination.read_bytes() == b"image"
     assert not (tmp_path / "someone_A title_abc123.jpg").exists()
     downloader_mock._move_hashed_file.assert_called_once_with(
@@ -56,20 +56,20 @@ def test_does_not_rename(
     destination = tmp_path / "2026-10-20_abc123_A title.jpg"
     if destination_exists:
         destination.write_bytes(b"other")
-    assert not RedditDownloader._rename_existing(downloader_mock, "hash", destination, make_submission(post_id))
+    assert not Downloader._rename_existing(downloader_mock, "hash", destination, make_submission(post_id))
     assert (tmp_path / "someone_A title_abc123.jpg").exists()
     downloader_mock._move_hashed_file.assert_not_called()
 
 
-def make_store(mode: str, tmp_path: Path) -> RedditDownloader:
+def make_store(mode: str, tmp_path: Path) -> Downloader:
     """A downloader with only its hash store set up"""
-    store = RedditDownloader.__new__(RedditDownloader)
+    store = Downloader.__new__(Downloader)
     store.args = Configuration()
     store.args.keep_hashes = mode == "json"
     store.args.keep_hashes_db = mode == "db"
     store.args.save_hashes_interval = 0
     store.master_hash_list, store.master_file_list, store.master_url_list = {}, {}, {}
-    store._RedditConnector__hash_db_conn = None
+    store._hash_db = None
     if mode == "db":
         connection = sqlite3.connect(tmp_path / "hashes.sqlite")
         connection.executescript(
@@ -77,7 +77,7 @@ def make_store(mode: str, tmp_path: Path) -> RedditDownloader:
             "CREATE TABLE hashes_file (file_path TEXT PRIMARY KEY, hash TEXT NOT NULL);"
             "CREATE TABLE hashes_url (url TEXT PRIMARY KEY, hash TEXT NOT NULL);"
         )
-        store._RedditConnector__hash_db_conn = connection
+        store._hash_db = connection
     return store
 
 
@@ -86,7 +86,7 @@ def test_move_hashed_file(mode: str, tmp_path: Path):
     store = make_store(mode, tmp_path)
     old, new = tmp_path / "old_abc123.jpg", tmp_path / "2026_abc123_new.jpg"
     if mode == "db":
-        connection = store._RedditConnector__hash_db_conn
+        connection = store._hash_db
         connection.execute("INSERT INTO hashes VALUES (?, ?)", ("h", os.fsencode(str(old))))
         connection.execute("INSERT INTO hashes_file VALUES (?, ?)", (os.fsencode(str(old)), "h"))
         connection.execute("INSERT INTO hashes_url VALUES (?, ?)", ("https://i.redd.it/x.jpg", "h"))
@@ -100,7 +100,7 @@ def test_move_hashed_file(mode: str, tmp_path: Path):
 
     assert Path(store._get_hashed_item("h")) == new
     if mode == "db":
-        files = store._RedditConnector__hash_db_conn.execute("SELECT file_path FROM hashes_file").fetchall()
+        files = store._hash_db.execute("SELECT file_path FROM hashes_file").fetchall()
         assert [os.fsdecode(row[0]) for row in files] == [str(new)]
     elif mode == "json":
         assert store.master_file_list == {str(new): "h"}
@@ -114,13 +114,17 @@ def test_move_hashed_file(mode: str, tmp_path: Path):
         ("Ends with dots...", "{REDDITOR}_{TITLE}_{POSTID}", None, "person_Ends with dots..._abc1234.jpg"),
     ),
 )
-def test_title_at_end_of_name(
-    title: str, scheme: str, index, expected: str, reddit_instance: praw.Reddit, tmp_path: Path
-):
-    data = {"id": "abc1234", "title": title, "author": "person", "subreddit": "test", "created_utc": 1618997400,
-            "score": 1, "link_flair_text": None}
-    submission = praw.models.Submission(reddit_instance, _data=data)
-    submission._fetched = True
+def test_title_at_end_of_name(title: str, scheme: str, index, expected: str, tmp_path: Path):
+    data = {
+        "id": "abc1234",
+        "title": title,
+        "author": "person",
+        "subreddit": "test",
+        "created_utc": 1618997400,
+        "score": 1,
+        "link_flair_text": None,
+    }
+    submission = Post(data)
     formatter = FileNameFormatter(scheme, "", "%Y-%m-%d", "linux")
     path = formatter.format_path(Resource(submission, "https://i.redd.it/x.jpg", lambda: None), tmp_path, index)
     assert path.name == expected
@@ -131,7 +135,7 @@ def test_url_of_existing_file_is_recorded(mode: str, tmp_path: Path):
     store = make_store(mode, tmp_path)
     path = tmp_path / "1abc234_A title.jpg"
     if mode == "db":
-        connection = store._RedditConnector__hash_db_conn
+        connection = store._hash_db
         connection.execute("INSERT INTO hashes VALUES (?, ?)", ("h", os.fsencode(str(path))))
         connection.execute("INSERT INTO hashes_file VALUES (?, ?)", (os.fsencode(str(path)), "h"))
     else:

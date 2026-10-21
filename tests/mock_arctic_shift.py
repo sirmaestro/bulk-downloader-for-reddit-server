@@ -52,8 +52,15 @@ class MockArcticShift:
         self.posts[post_id] = post
         return post
 
-    def fail(self, endpoint: str, status: int = 503, error: Optional[str] = None, drop: bool = False,
-             invalid_json: bool = False, times: int = 1):
+    def fail(
+        self,
+        endpoint: str,
+        status: int = 503,
+        error: Optional[str] = None,
+        drop: bool = False,
+        invalid_json: bool = False,
+        times: int = 1,
+    ):
         self.failures.setdefault(endpoint, []).extend(
             [{"status": status, "error": error, "drop": drop, "invalid_json": invalid_json}] * times
         )
@@ -94,7 +101,7 @@ class MockArcticShift:
                 if parts.path.startswith("/media/"):
                     endpoint = "media"
                 elif parts.path.startswith("/api/"):
-                    endpoint = parts.path[len("/api/"):]
+                    endpoint = parts.path[len("/api/") :]
                     with mock._lock:
                         mock.requests.append((endpoint, params))
                 else:
@@ -112,7 +119,7 @@ class MockArcticShift:
                     body = {"error": failure["error"]} if failure["error"] else {}
                     return self._send(failure["status"], json.dumps(body).encode(), "application/json")
                 if endpoint == "media":
-                    data = mock.media.get(parts.path[len("/media/"):])
+                    data = mock.media.get(parts.path[len("/media/") :])
                     if data is None:
                         return self._send(404, b"", "text/plain")
                     return self._send(200, data, "image/jpeg")
@@ -140,9 +147,11 @@ class MockArcticShift:
         self.base = f"http://127.0.0.1:{self._httpd.server_address[1]}"
         threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
         try:
-            with patch.object(ArcticShift, "API_URL", f"{self.base}/api"), patch.object(
-                ArcticShift, "MIN_REQUEST_INTERVAL", 0
-            ), patch.object(ArcticShift, "_retry_delay", staticmethod(lambda error, attempt: 0)):
+            with (
+                patch.object(ArcticShift, "API_URL", f"{self.base}/api"),
+                patch.object(ArcticShift, "MIN_REQUEST_INTERVAL", 0),
+                patch.object(ArcticShift, "_retry_delay", staticmethod(lambda error, attempt: 0)),
+            ):
                 yield self
         finally:
             self._httpd.shutdown()

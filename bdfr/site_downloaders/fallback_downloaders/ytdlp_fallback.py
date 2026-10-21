@@ -2,14 +2,11 @@
 # -*- coding: utf-8 -*-
 
 import logging
-from typing import Optional
-
-from praw.models import Submission
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import NotADownloadableLinkError
+from bdfr.post import Post
 from bdfr.resource import Resource
-from bdfr.site_authenticator import SiteAuthenticator
 from bdfr.site_downloaders.fallback_downloaders.fallback_downloader import BaseFallbackDownloader
 from bdfr.site_downloaders.youtube import Youtube
 
@@ -17,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 class YtdlpFallback(BaseFallbackDownloader, Youtube):
-    def __init__(self, post: Submission, args: Configuration):
+    def __init__(self, post: Post, args: Configuration):
         super().__init__(post, args)
 
-    def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> list[Resource]:
+    def find_resources(self) -> list[Resource]:
         out = Resource(
             self.post,
             self.post.url,

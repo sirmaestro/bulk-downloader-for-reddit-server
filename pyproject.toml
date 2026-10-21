@@ -1,53 +1,56 @@
 [build-system]
-requires = ["setuptools>=65.6.0", "wheel"]
+requires = ["setuptools>=84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bdfr"
-description = "Downloads content posted to Reddit, reading posts from the Arctic Shift archive (saved-hashes fork of BDFR)"
+description = "Keeps folders of Reddit media up to date from the Arctic Shift archive, without duplicates (saved-hashes fork of BDFR)"
 readme = "README.md"
-requires-python = ">=3.9"
-license = {file = "LICENSE"}
-keywords = ["reddit", "download", "archive",]
+requires-python = ">=3.11"
+license-files = ["LICENSE"]
+keywords = ["reddit", "download", "archive", "arctic-shift"]
 authors = [{name = "Ali Parlakci", email = "parlakciali@gmail.com"}]
 maintainers = [{name = "Serene Arc", email = "serenical@gmail.com"}]
 classifiers = [
     "Environment :: Console",
+    "Environment :: Web Environment",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "appdirs>=1.4.4",
-    "beautifulsoup4>=4.10.0",
-    "click>=8.0.0",
-    "dict2xml>=1.7.0",
-    "praw>=7.2.0",
-    "pyyaml>=5.4.1",
-    "requests>=2.25.1",
-    "yt-dlp>=2022.11.11",
-    "emoji>=2.2.0",
+    "beautifulsoup4>=4.15.0",
+    "click>=8.5.0",
+    "emoji>=2.16.0",
+    "platformdirs>=4.13.5",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
+    "yt-dlp>=2026.8.19",
 ]
 dynamic = ["version"]
 
 [tool.setuptools]
-dynamic = {"version" = {attr = 'bdfr.__version__'}}
-packages = ["bdfr", "bdfr.archive_entry", "bdfr.site_downloaders", "bdfr.site_downloaders.fallback_downloaders",]
-data-files = {"config" = ["bdfr/default_config.cfg",]}
+packages = ["bdfr", "bdfr.site_downloaders", "bdfr.site_downloaders.fallback_downloaders"]
+
+[tool.setuptools.dynamic]
+version = {attr = "bdfr.__version__"}
+
+[tool.setuptools.package-data]
+bdfr = ["default_config.cfg"]
 
 [project.optional-dependencies]
 dev = [
-    "black>=22.12.0",
-    "Flake8-pyproject>=1.2.2",
-    "isort>=5.11.4",
-    "pre-commit>=2.20.0",
-    "pytest>=7.1.0",
-    "tox>=3.27.1",
+    "black>=26.10.1",
+    "flake8>=7.4.1",
+    "Flake8-pyproject>=1.2.4",
+    "isort>=9.0.2",
+    "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
 ]
 
 [project.urls]
@@ -56,33 +59,31 @@ dev = [
 
 [project.scripts]
 bdfr = "bdfr.__main__:cli"
-bdfr-archive = "bdfr.__main__:cli_archive"
-bdfr-clone = "bdfr.__main__:cli_clone"
-bdfr-download = "bdfr.__main__:cli_download"
 
 [tool.black]
 line-length = 120
+target-version = ["py311"]
 
 [tool.flake8]
 exclude = ["scripts"]
 max-line-length = 120
+# E203 (whitespace before ":" in slices) conflicts with black
+extend-ignore = ["E203"]
 show-source = true
 statistics = true
 
 [tool.isort]
 profile = "black"
-py_version = 39
+py_version = 311
 multi_line_output = 3
 line_length = 120
 indent = 4
 
 [tool.pytest.ini_options]
-minversion = "7.1"
+minversion = "9.0"
 addopts = "--strict-markers"
 testpaths = "tests"
 markers = [
-    "online: tests require a connection to the internet",
-    "reddit: tests require a connection to Reddit",
+    "online: tests require a connection to the internet (third-party media hosts)",
     "slow: test is slow to run",
-    "authenticated: test requires an authenticated Reddit instance",
 ]

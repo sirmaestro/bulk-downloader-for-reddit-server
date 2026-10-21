@@ -6,11 +6,11 @@ import logging
 from pathlib import Path
 
 from bdfr.configuration import Configuration
-from bdfr.downloader import RedditDownloader
+from bdfr.downloader import Downloader
 
 
-def make_connector(log_path: Path, rotate_bytes: int = 0) -> RedditDownloader:
-    connector = RedditDownloader.__new__(RedditDownloader)
+def make_connector(log_path: Path, rotate_bytes: int = 0) -> Downloader:
+    connector = Downloader.__new__(Downloader)
     connector.args = Configuration()
     connector.args.log = str(log_path)
     connector.args.log_rotate_bytes = rotate_bytes

@@ -1,19 +1,21 @@
 # Bulk Downloader for Reddit (saved-hashes fork)
 
-A fork of [Bulk Downloader for Reddit](https://github.com/aliparlakci/bulk-downloader-for-reddit) (BDFR) built for keeping folders of Reddit media up to date: run it regularly and it fetches what's new, skipping what you already have.
+A fork of [Bulk Downloader for Reddit](https://github.com/aliparlakci/bulk-downloader-for-reddit) (BDFR) that keeps folders of Reddit media up to date. It runs as a small server, `bdfr serve`, for example in Docker on an always-on machine. A Tampermonkey userscript sends it the posts on the old.reddit.com pages you visit, and it checks a watch list of users against the [Arctic Shift](https://arctic-shift.photon-reddit.com) archive every week. Media is downloaded from where it is hosted (i.redd.it, v.redd.it, Redgifs, Imgur and so on), and each folder keeps a hash store, so nothing is downloaded twice. `bdfr download` does the same from the command line.
 
-**Reddit's API is closed to personal scripts.** Since November 2025, Reddit has required approval for API access and rejects personal tools, so upstream BDFR gets HTTP 403 errors. This fork reads posts from the [Arctic Shift](https://arctic-shift.photon-reddit.com) archive of Reddit instead, and downloads the media from where it is hosted (i.redd.it, v.redd.it, Redgifs, Imgur and so on). Features that only work through Reddit's API are [deprecated](#deprecated-reddit-api-features).
+**Reddit's API is closed to personal scripts.** Since November 2025, Reddit has required approval for API access and rejects personal tools, so upstream BDFR gets HTTP 403 errors. This fork reads posts from Arctic Shift, or from Reddit in your browser through the userscript. Version 3.0 removed everything that needed Reddit's API; see [Removed in 3.0](#removed-in-30).
 
 What this fork adds over upstream:
 
-- Reading posts from Arctic Shift (`--source`, the default) or from JSON exported in the browser (`--post-json`)
+- `bdfr serve`, the [userscript](#downloading-from-the-browser) and [watched users](#watched-users)
+- Reading posts from Arctic Shift or from JSON exported in the browser (`--post-json`)
 - Duplicate detection that survives between runs: hashes kept in JSON files (`--keep-hashes`) or SQLite (`--keep-hashes-db`), plus the URLs already downloaded
-- Stopping a listing once it reaches media you already have (`--stop-at-existing`)
+- Stopping a listing once it reaches media you already have (`--stop-at-existing`), and downloading several posts at once (`--parallel`)
+- Offline renaming of downloaded files to a new file scheme (`bdfr rename`)
 - Unicode file names on Windows (`--filename-character-set`), faster failure on network errors (`--fail-fast`) and Imgur tweaks (`--imgur-originals`, `--imgur-fix404`)
 
 ## Installation
 
-Needs Python 3.9 or later, and [ffmpeg](https://ffmpeg.org) on `PATH` for Reddit-hosted videos.
+Needs Python 3.11 or later, and [ffmpeg](https://ffmpeg.org) on `PATH` for Reddit-hosted videos. To run the server in Docker instead, see [Running in Docker](#running-in-docker).
 
 ```bash
 git clone https://github.com/sirmaestro/bulk-downloader-for-reddit_with-saved-hashes.git
@@ -21,35 +23,12 @@ cd bulk-downloader-for-reddit_with-saved-hashes
 python -m pip install -e .
 ```
 
+
 This installs the `bdfr` command (or run `python -m bdfr`). To update, run `git pull` in the folder. Don't run `bdfr/__main__.py` directly: Python then imports any other `bdfr` installed from PyPI instead of this fork, and the fork's options are ignored with "Ignoring an unknown CLI argument" warnings.
 
 `bdfr --version` shows the installed version.
 
-## Usage
-
-```bash
-# New posts by a user, stopping at ones already downloaded
-bdfr download ./output --user someone --submitted --stop-at-existing 5 --no-dupes --search-existing --keep-hashes-db
-
-# The latest 50 posts in two subreddits from the past week
-bdfr download ./output --subreddit 'pics, aww' -L 50 -t week
-
-# Specific posts
-bdfr download ./output -l 1xa496l -l https://www.reddit.com/r/aww/comments/1xae8q4/
-
-# Posts collected in the browser (see --post-json)
-bdfr download ./output --post-json bdfr-posts-20261020-153000.json
-```
-
-Options can also come from a YAML file with `--opts my_opts.yaml`, using the option names with underscores instead of dashes (`file_scheme`, not `file-scheme`); see [opts_example.yaml](opts_example.yaml). Options given more than once on the command line are lists in YAML. Command line options take priority over the file.
-
-### Keeping a folder up to date
-
-For regular runs, combine:
-
-- `--stop-at-existing 5` so each listing stops after 5 already-downloaded posts in a row, which usually means one request to Arctic Shift per user or subreddit
-- `--keep-hashes-db` (or `--keep-hashes`) so downloaded media URLs and file hashes are remembered between runs
-- `--no-dupes` and `--search-existing` so the same media posted again under a different URL isn't saved twice
+## Running the server
 
 ### Downloading from the browser
 
@@ -98,23 +77,54 @@ users:
     folder: Some folder
 ```
 
-To run it on an always-on machine, use the [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml): set the download folder, the user ID that should own the files and `BDFR_TOKEN`, then `docker compose up -d --build`. The watchlist goes in `config/bdfr/watchlist.yaml`. The container listens on the network (`--host 0.0.0.0`), so in the userscript's ⚙ use the machine's LAN address, e.g. `http://192.168.1.20:7635`. The token is the only protection and isn't encrypted, so keep the port inside your home network.
+
+### Running in Docker
+
+To run the server on an always-on machine, use the [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml): set the download folder, the user ID that should own the files and `BDFR_TOKEN`, then `docker compose up -d --build`. The watchlist goes in `config/bdfr/watchlist.yaml`. The container listens on the network (`--host 0.0.0.0`), so in the userscript's ⚙ use the machine's LAN address, e.g. `http://192.168.1.20:7635`. The token is the only protection and isn't encrypted, so keep the port inside your home network.
+
 
 Day to day, the userscript brings watched users' new posts from Reddit itself: on any old.reddit page you open, users not synced for 6 hours (`syncEveryHours` in `SETTINGS`) have their newest posts read with your login (`submitted.json`, 100 posts per request, 2 seconds apart) until 5 posts in a row are already downloaded, and the new media posts are sent to the server as a job. Galleries come with their images, so this costs Arctic Shift nothing. One tab syncs at a time, and nothing shows on the page; failures (logged out, a deleted or suspended user, the server unreachable, ...) are logged in the browser console (F12) as warnings starting `BDFR sync:`, and that user is tried again after an hour. For NSFW users, allow mature content in your Reddit preferences. Turn it off with `backgroundSync: false`. Reddit itself only lists a user's newest 1000 posts and nothing removed, which is what the weekly archive check below is for.
 
 A user's first check reads their whole archive. After that, each check reads every archived post since the previous check (plus the overlap) to its end, so posts missing between downloaded ones are found too; posts already in the folder cost no requests, so a quiet week is one request. Checks run one at a time with a minute between them, and the file is read again as it changes, so there's no need to restart. A check that fails (Arctic Shift unavailable, ...) is logged as a warning and its window is read again later, so nothing is skipped. `GET /watchlist` (with the token) shows each user's last successful check, last error and next check; progress is in `watchlist_state.json` next to the watchlist.
 
+## Command-line downloads
+
+`bdfr download` runs one download and exits, with the same duplicate checks as the server but none of its defaults (see [Options](#options)).
+
+```bash
+# New posts by a user, stopping at ones already downloaded
+bdfr download ./output --user someone --submitted --stop-at-existing 5 --no-dupes --search-existing --keep-hashes-db
+
+# The latest 50 posts in two subreddits from the past week
+bdfr download ./output --subreddit 'pics, aww' -L 50 -t week
+
+# Specific posts
+bdfr download ./output -l 1xa496l -l https://www.reddit.com/r/aww/comments/1xae8q4/
+
+# Posts collected in the browser (see --post-json)
+bdfr download ./output --post-json bdfr-posts-20261020-153000.json
+```
+
+Options can also come from a YAML file with `--opts my_opts.yaml`, using the option names with underscores instead of dashes (`file_scheme`, not `file-scheme`); see [opts_example.yaml](opts_example.yaml). Options given more than once on the command line are lists in YAML. Command line options take priority over the file.
+
+### Keeping a folder up to date
+
+For regular runs, combine:
+
+- `--stop-at-existing 5` so each listing stops after 5 already-downloaded posts in a row, which usually means one request to Arctic Shift per user or subreddit
+- `--keep-hashes-db` (or `--keep-hashes`) so downloaded media URLs and file hashes are remembered between runs
+- `--no-dupes` and `--search-existing` so the same media posted again under a different URL isn't saved twice
+
 ## Options
+
+These apply to `bdfr download` and `bdfr serve` (where they apply to every job, on top of [serve's defaults](#downloading-from-the-browser)).
 
 ### Sources
 
+Posts are read from Arctic Shift, newest first; nothing is requested from Reddit's API. Arctic Shift keeps posts that were later deleted, so their media may no longer download. The number of requests made to Arctic Shift is logged at the end of each run.
+
 - `directory`
     - Where downloads are saved
-- `--source`
-    - Where posts are read from: `arctic-shift` (default) or `reddit` (deprecated)
-    - With `arctic-shift`, listings are always newest first, and nothing is requested from Reddit's API
-    - Arctic Shift keeps posts that were later deleted, so their media may no longer download
-    - The number of requests made to Arctic Shift is logged at the end of each run
 - `-u, --user`
     - A user to read posts from, with `--submitted`; can be given more than once
 - `--submitted`
@@ -123,7 +133,7 @@ A user's first check reads their whole archive. After that, each check reads eve
     - A subreddit to read posts from; can be given more than once or as a comma-separated list, e.g. `-s 'pics, aww'`
 - `-l, --link`
     - A post to download, as a URL or ID; can be given more than once
-    - With `arctic-shift`, posts are looked up 100 per request
+    - Posts are looked up in Arctic Shift, 100 per request
 - `--include-id-file`
     - Files of post IDs to download, one per line; can be given more than once
 - `--post-json`
@@ -134,8 +144,7 @@ A user's first check reads their whole archive. After that, each check reads eve
 - `-L, --limit`
     - The most posts to read from each source, e.g. `-L 10` with three subreddits reads up to 30 posts
 - `-t, --time`
-    - With `arctic-shift`: only posts from the last `hour`, `day`, `week`, `month` or `year`; `all` (default) has no limit
-    - With `reddit`: the time window for `top` and `controversial` sorts
+    - Only posts from the last `hour`, `day`, `week`, `month` or `year`; `all` (default) has no limit
 - `--parallel`
     - How many posts to download at once, from 1 (default) to 16; 4 is a good start when many posts are videos (Redgifs, v.redd.it)
     - Only fetching and downloading run side by side: duplicate checks, the hash store and writing files happen one at a time, so duplicates are still caught, and results are reported (and `--stop-at-existing` counted) in listing order
@@ -145,7 +154,6 @@ A user's first check reads their whole archive. After that, each check reads eve
 - `--stop-at-existing`
     - Stops reading a listing after this many already-downloaded posts in a row, then moves on to the next one
     - A post counts as already downloaded when its files already exist at their destination or, with `--keep-hashes`/`--keep-hashes-db`, its media URLs are already stored. Posts that are filtered out, fail, or turn out to be duplicates by hash don't count either way, since a new post can repost old media
-    - Listings must be newest first, which they always are with `arctic-shift`
     - Posts given with `--link`, `--include-id-file` or `--post-json` are always all checked, and come before the listings. A listing skips posts already handled in the same run without counting them
 
 ### Filtering
@@ -226,20 +234,17 @@ A user's first check reads their whole archive. After that, each check reads eve
 - `-v, --verbose`
     - Log more detail; can be given twice
 
-## Deprecated: Reddit API features
+## Removed in 3.0
 
-These only work through Reddit's API, which no longer grants access to personal scripts, so they are deprecated. They still exist and log a deprecation warning, and will work if your Reddit app still has API access.
+Reddit's API no longer grants access to personal scripts, so everything that needed it has been removed:
 
-- `--source reddit` and running `archive` or `clone` (which always use Reddit's API, since only Reddit has comments)
-- `--authenticate`: logs in to Reddit with OAuth2. On first use BDFR shows a Reddit URL to approve, then saves the token as `user_token` in the configuration file; delete that line to log in again. It needs `client_id`, `client_secret` and `scopes` in the configuration file
-- `--saved`, `--upvoted`: a user's saved or upvoted posts; need `--authenticate` and `--user me`
-- `--subscribed`: the subreddits the logged in user subscribes to
-- `-m, --multireddit`: a multireddit of the single `--user`
-- `--search`: search subreddits or multireddits for a term
-- `-S, --sort`: `hot` (default), `new`, `top`, `controversial`, `rising` or `relevance` (with `--search`). Arctic Shift listings are always newest first
-- `archive`: saves post data and comments as `json` (default), `xml` or `yaml` (`-f, --format`), with `--all-comments` (a user's comments, with `--user`), `--comment-context` (the whole post a comment belongs to), `--no-comments` and `--ignore-score` (don't count score changes as updates to saved data)
-- `clone`: `archive` and `download` in one run, taking the options of both
-- [scripts/unsaveposts.py](scripts/unsaveposts.py): unsaves posts listed in a log file from your account
+- The `archive` and `clone` commands (post data and comments as JSON, XML or YAML)
+- `--source reddit`; posts always come from Arctic Shift, `--link`/`--include-id-file` IDs or `--post-json` files
+- `--authenticate`, `--saved`, `--upvoted`, `--subscribed`, `-m, --multireddit`, `--search` and `-S, --sort` (Arctic Shift listings are always newest first)
+- `bdfr completion`, the `bdfr-archive`, `bdfr-clone` and `bdfr-download` commands, and `scripts/unsaveposts.py`
+
+Old `--opts` files that still set these are read with an "Ignoring an unknown YAML argument" warning. The `client_id`, `client_secret`, `scopes` and `user_token` keys in existing configuration files are ignored. If you still have Reddit API access and need these, use a version before 3.0 from the git history.
+
 
 ## Folder and File Name Schemes
 
@@ -316,12 +321,7 @@ Made 1 request to Arctic Shift (59 posts looked up: 40 gallery, 15 self post, 4 
 
 ### Configuration File
 
-Required keys:
-
-- `client_id`, `client_secret`: a Reddit app's credentials. Arctic Shift doesn't use them, but BDFR still needs them to build its post objects; the defaults work
-- `scopes`: the OAuth2 permissions requested by the deprecated `--authenticate`
-
-Optional keys:
+All keys are optional:
 
 - `backup_log_count`
 - `max_wait_time`
@@ -357,7 +357,7 @@ When a site rate-limits a download, BDFR waits 60 seconds and retries, then 120 
 
 ## Multiple Instances
 
-Several runs can be scripted one after another, for example with different `--config` files or sources. Runs at the same time must each use their own `--log` file, as Windows doesn't allow two processes to write the same log, and must not share a `directory` when using `--keep-hashes`.
+Several `bdfr download` runs can be scripted one after another, for example with different `--config` files or sources. Runs at the same time must each use their own `--log` file, as Windows doesn't allow two processes to write the same log, and must not share a `directory` when using `--keep-hashes`.
 
 ## Filesystem Restrictions
 
@@ -385,4 +385,4 @@ The [scripts](scripts) folder has Bash and PowerShell scripts that read BDFR log
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for how the code is organised, how to run the tests, and the fork's conventions. Upstream's [contributing guide](docs/CONTRIBUTING.md) and [Code of Conduct](docs/CODE_OF_CONDUCT.md) still apply.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how a download flows through the code, and [AGENTS.md](AGENTS.md) for the layout, how to run the tests, and the invariants that keep existing folders from being downloaded again.

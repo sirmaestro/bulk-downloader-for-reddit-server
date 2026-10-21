@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import _hashlib
 import hashlib
 import logging
 import re
@@ -9,17 +10,16 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Optional
 
-import _hashlib
 import requests
-from praw.models import Submission
 
 from bdfr.exceptions import BulkDownloaderException
+from bdfr.post import Post
 
 logger = logging.getLogger(__name__)
 
 
 class Resource:
-    def __init__(self, source_submission: Submission, url: str, download_function: Callable, extension: str = None):
+    def __init__(self, source_submission: Post, url: str, download_function: Callable, extension: str = None):
         self.source_submission = source_submission
         self.content: Optional[bytes] = None
         self.url = url
@@ -81,7 +81,7 @@ class Resource:
             except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
                 logger.warning(f"Error occured downloading from {url}, waiting {current_wait_time} seconds: {e}")
                 if fail_fast and ("[Errno 11001]" in str(e) or "[WinError 10061]" in str(e)):
-                    #getaddrinfo failed #No connection could be made because the target machine actively refused it
+                    # getaddrinfo failed #No connection could be made because the target machine actively refused it
                     raise
                 time.sleep(current_wait_time)
                 if current_wait_time < max_wait_time:

@@ -18,12 +18,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import praw
-import praw.models
-
-from bdfr.connector import RedditConnector, _calc_hash
 from bdfr.exceptions import BulkDownloaderException
 from bdfr.file_name_formatter import FileNameFormatter
+from bdfr.hash_store import HashStore, _calc_hash
+from bdfr.post import Post
 from bdfr.resource import Resource
 
 logger = logging.getLogger(__name__)
@@ -38,10 +36,16 @@ KEY_PATTERNS = {
     "FLAIR": r".*?",
     "DATE": r".+?",
 }
-SUBMISSION_FIELDS = {"POSTID": "id", "REDDITOR": "author", "SUBREDDIT": "subreddit", "UPVOTES": "score",
-                     "TITLE": "title", "FLAIR": "link_flair_text"}
+SUBMISSION_FIELDS = {
+    "POSTID": "id",
+    "REDDITOR": "author",
+    "SUBREDDIT": "subreddit",
+    "UPVOTES": "score",
+    "TITLE": "title",
+    "FLAIR": "link_flair_text",
+}
 UNDO_PREFIX = "bdfr-rename-"
-# The same tables RedditConnector creates for --keep-hashes-db
+# The same tables HashStore creates for --keep-hashes-db
 HASH_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS hashes (hash TEXT PRIMARY KEY, file_path TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hashes_file (file_path TEXT PRIMARY KEY, hash TEXT NOT NULL);
@@ -96,9 +100,6 @@ class Renamer:
         self.old_scheme = old_scheme
         self.folder_is_user = folder_is_user
         self.formatter = FileNameFormatter(new_scheme, "", time_format, restriction_scheme, character_set)
-        # Only used to build submission objects; never makes a request
-        self.reddit = praw.Reddit(client_id="offline", client_secret="offline", user_agent="bdfr rename",
-                                  check_for_updates=False)
 
     def plan(self, directory: Path, recursive: bool = True) -> tuple[list[tuple[Path, Path]], list[tuple[Path, str]]]:
         renames, skipped, targets = [], [], set()
@@ -118,14 +119,19 @@ class Renamer:
         return renames, skipped
 
     def _new_path(self, path: Path, fields: dict) -> Path:
-        data = {"id": fields["postid"], "title": "", "author": "[deleted]", "subreddit": "unknown", "score": 0,
-                "link_flair_text": None, "created_utc": path.stat().st_mtime}
+        data = {
+            "id": fields["postid"],
+            "title": "",
+            "author": "[deleted]",
+            "subreddit": "unknown",
+            "score": 0,
+            "link_flair_text": None,
+            "created_utc": path.stat().st_mtime,
+        }
         for key, attribute in SUBMISSION_FIELDS.items():
             if key.lower() in fields:
                 data[attribute] = int(fields[key.lower()]) if key == "UPVOTES" else fields[key.lower()]
-        submission = praw.models.Submission(self.reddit, _data=data)
-        submission._fetched = True
-        resource = Resource(submission, "", lambda: None, fields["ext"])
+        resource = Resource(Post(data), "", lambda: None, fields["ext"])
         index = int(fields["index"]) if fields.get("index") else None
         return self.formatter.format_path(resource, path.parent, index)
 
@@ -135,7 +141,7 @@ def media_files(directory: Path, recursive: bool = True) -> list[Path]:
     lists"""
     files = []
     for dirpath, dirnames, filenames in os.walk(directory):
-        files.extend(Path(dirpath, name) for name in sorted(filenames) if not RedditConnector._is_own_file(name))
+        files.extend(Path(dirpath, name) for name in sorted(filenames) if not HashStore._is_own_file(name))
         if not recursive:
             dirnames.clear()
     return files
@@ -206,10 +212,10 @@ def update_hash_store(directory: Path, renames: list[tuple[Path, Path]]):
     hash_list_path, file_list_path = directory / "hash_list.json", directory / "hash_file_list.json"
     if hash_list_path.exists():
         hash_list = json.loads(hash_list_path.read_text(encoding="utf-8"))
-        RedditConnector._write_json(str(hash_list_path), {h: mapping.get(p, p) for h, p in hash_list.items()})
+        HashStore._write_json(str(hash_list_path), {h: mapping.get(p, p) for h, p in hash_list.items()})
     if file_list_path.exists():
         file_list = json.loads(file_list_path.read_text(encoding="utf-8"))
-        RedditConnector._write_json(str(file_list_path), {mapping.get(p, p): h for p, h in file_list.items()})
+        HashStore._write_json(str(file_list_path), {mapping.get(p, p): h for p, h in file_list.items()})
 
 
 def rename_directory(

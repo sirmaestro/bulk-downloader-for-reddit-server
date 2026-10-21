@@ -1,5 +1,4 @@
 # Example for --opts: any command line option, with dashes written as underscores
-source: arctic-shift
 user:
   - example_user
 submitted: true

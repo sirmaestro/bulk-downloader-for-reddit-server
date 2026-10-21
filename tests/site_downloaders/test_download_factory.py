@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import praw
 import pytest
 
 from bdfr.exceptions import NotADownloadableLinkError
@@ -54,7 +53,7 @@ from bdfr.site_downloaders.youtube import Youtube
         ("https://www.patreon.com/posts/minecart-track-59346560", Gallery),
     ),
 )
-def test_factory_lever_good(test_submission_url: str, expected_class: BaseDownloader, reddit_instance: praw.Reddit):
+def test_factory_lever_good(test_submission_url: str, expected_class: BaseDownloader):
     result = DownloadFactory.pull_lever(test_submission_url)
     assert result is expected_class
 

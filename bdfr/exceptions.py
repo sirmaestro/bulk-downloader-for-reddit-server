@@ -6,18 +6,6 @@ class BulkDownloaderException(Exception):
     pass
 
 
-class RedditUserError(BulkDownloaderException):
-    pass
-
-
-class RedditAuthenticationError(RedditUserError):
-    pass
-
-
-class ArchiverError(BulkDownloaderException):
-    pass
-
-
 class ArcticShiftError(BulkDownloaderException):
     pass
 

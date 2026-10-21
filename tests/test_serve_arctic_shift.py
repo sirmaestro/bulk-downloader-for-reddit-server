@@ -91,8 +91,9 @@ def test_listing_failing_part_way_keeps_what_was_downloaded(serve: DownloadServe
         archive.add_post(f"abc000{number}", NOW - number * 100)
     job_payload = {"folder": "someone", "user": "someone", "archive": "all"}
     # The first page is answered, every attempt at the second fails
-    archive.failures["posts/search"] = [None] + [{"status": 503, "error": None, "drop": False,
-                                                  "invalid_json": False}] * 5
+    archive.failures["posts/search"] = [None] + [
+        {"status": 503, "error": None, "drop": False, "invalid_json": False}
+    ] * 5
     job = run(serve, job_payload)
     assert job.state == "failed"
     assert job.counts["new"] == 3

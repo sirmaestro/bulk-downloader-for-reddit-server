@@ -14,13 +14,13 @@ from unittest.mock import patch
 import pytest
 
 from bdfr.configuration import Configuration
-from bdfr.server import Job, DownloadServer, load_token, make_handler
+from bdfr.server import DownloadServer, Job, load_token, make_handler
 
 TOKEN = "test-token"
 
 
 class FakeDownloader:
-    """Stands in for RedditDownloader, recording the arguments each job ran with"""
+    """Stands in for Downloader, recording the arguments each job ran with"""
 
     runs = []
 
@@ -42,7 +42,7 @@ class FakeDownloader:
 @pytest.fixture()
 def server(tmp_path: Path):
     FakeDownloader.runs = []
-    with patch("bdfr.server.RedditDownloader", FakeDownloader):
+    with patch("bdfr.server.Downloader", FakeDownloader):
         args = Configuration()
         args.stop_at_existing = 0
         download_server = DownloadServer(args, tmp_path, TOKEN, tmp_path / "serve_log.txt")
@@ -110,7 +110,7 @@ def test_posts_job(server, tmp_path: Path):
     args, post_ids = FakeDownloader.runs[0]
     assert post_ids == ["a", "b", "c"]
     assert Path(args.directory) == tmp_path / "some user"
-    assert args.source == "arctic-shift" and args.stop_at_existing == 0 and not args.user
+    assert args.stop_at_existing == 0 and not args.user
     assert not Path(args.post_json[0]).exists()
 
 
@@ -173,9 +173,11 @@ def test_run_server_host(tmp_path: Path, caplog, host, expected, warns):
     args.directory = str(tmp_path / "root")
     args.watchlist = str(tmp_path / "watchlist.yaml")
     args.host = host
-    with patch("bdfr.server.ThreadingHTTPServer", StopServing), patch(
-        "bdfr.server.appdirs.user_config_dir", lambda *a: str(tmp_path / "config")
-    ), caplog.at_level("INFO"):
+    with (
+        patch("bdfr.server.ThreadingHTTPServer", StopServing),
+        patch("bdfr.server.platformdirs.user_config_dir", lambda *a: str(tmp_path / "config")),
+        caplog.at_level("INFO"),
+    ):
         run_server(args, 7635)
     assert StopServing.addresses == [(expected, 7635)]
     assert f"http://{expected}:7635" in caplog.text
@@ -211,7 +213,9 @@ def test_known_posts_from_file_names(server, tmp_path: Path):
     )
     for name in names:
         (folder / name).write_text("x")
-    status, result = call(base, "POST", "/known", {"folder": "someone", "ids": ["abc123", "def456", "ghi789", "zzz999", "2", "title"]})
+    status, result = call(
+        base, "POST", "/known", {"folder": "someone", "ids": ["abc123", "def456", "ghi789", "zzz999", "2", "title"]}
+    )
     assert status == 200
     assert result == {"known": ["abc123", "def456", "ghi789"], "known_by_link": [], "duplicates": [], "supported": True}
     assert call(base, "POST", "/known", {"folder": "missing", "ids": ["abc123"]})[1]["known"] == []
@@ -263,12 +267,25 @@ def test_known_posts_by_link(server, tmp_path: Path, store: str):
 @pytest.mark.parametrize(
     ("extra", "expected"),
     (
-        ([], {"no_dupes": True, "search_existing": True, "keep_hashes_db": True, "folder_scheme": "",
-              "file_scheme": "{POSTID}_{TITLE}", "parallel": 4}),
-        (["--parallel", "2", "--file-scheme", "{TITLE}_{POSTID}"], {"parallel": 2, "file_scheme": "{TITLE}_{POSTID}",
-                                                                    "no_dupes": True}),
-        (["--no-defaults"], {"no_dupes": False, "keep_hashes_db": False, "folder_scheme": "{SUBREDDIT}",
-                             "parallel": 1}),
+        (
+            [],
+            {
+                "no_dupes": True,
+                "search_existing": True,
+                "keep_hashes_db": True,
+                "folder_scheme": "",
+                "file_scheme": "{POSTID}_{TITLE}",
+                "parallel": 4,
+            },
+        ),
+        (
+            ["--parallel", "2", "--file-scheme", "{TITLE}_{POSTID}"],
+            {"parallel": 2, "file_scheme": "{TITLE}_{POSTID}", "no_dupes": True},
+        ),
+        (
+            ["--no-defaults"],
+            {"no_dupes": False, "keep_hashes_db": False, "folder_scheme": "{SUBREDDIT}", "parallel": 1},
+        ),
     ),
 )
 def test_serve_defaults(tmp_path: Path, extra: list, expected: dict):

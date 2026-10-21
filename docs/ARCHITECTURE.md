@@ -1,41 +1,45 @@
 # Architecture
 
-When the project was rewritten for v2, the goal was to make the codebase easily extensible and much easier to read and modify. However, this document provides a step-by-step look through the process that the BDFR goes through, so that any prospective developers can more easily grasp the way the code works.
+How a request becomes files on disk. For the module list, test commands and the invariants that keep existing folders from being downloaded again, see [AGENTS.md](../AGENTS.md).
 
-## Design Ethos
+## Where posts come from
 
-The BDFR is designed to be a stateless downloader. This means that the state of the program is forgotten between each run of the program. There are no central lists, databases, or indices, that the BDFR uses, only the actual files on disk. There are several advantages to this approach:
+Reddit's API is closed to personal scripts, so BDFR never talks to it. Posts arrive in three ways:
 
-1. There is no chance of the database being corrupted or changed by something other than the BDFR, rendering the BDFR's "idea" of the archive wrong or incomplete.
-2. Any information about the archive is contained by the archive itself i.e. for a list of all submission IDs in the archive, this can be extracted from the names of the files in said archive, assuming an appropriate naming scheme was used.
-3. Archives can be merged, split, or editing without worrying about having to update a central database
-4. There are no versioning issues between updates of the BDFR, where old version are stuck with a worse form of the database
-5. An archive can be put on a USB, moved to another computer with possibly a very different BDFR version, and work completely fine
+- **The userscript** ([scripts/tampermonkey/bdfr-export.user.js](../scripts/tampermonkey/bdfr-export.user.js)) reads posts from old.reddit.com in the browser, using the browser's login, and sends them to `bdfr serve` as a job. It reads galleries' image lists from Reddit itself, so those need no lookup.
+- **The watchlist scheduler** (`bdfr/scheduler.py`) queues an Arctic Shift job for each watched user once a week, covering the time since that user's last successful check.
+- **The command line** (`bdfr download`): subreddit and user listings from Arctic Shift, post IDs and links, and `--post-json` files exported by the userscript.
 
-Another major part of the ethos of the design is DOTADIW, Do One Thing And Do It Well. It's a major part of Unix philosophy and states that each tool should have a well-defined, limited purpose. To this end, the BDFR is, as the name implies, a *downloader*. That is the scope of the tool. Managing the files downloaded can be for better-suited programs, since the BDFR is not a file manager. Nor the BDFR concern itself with how any of the data downloaded is displayed, changed, parsed, or analysed. This makes the BDFR suitable for data science-related tasks, archiving, personal downloads, or analysis of various Reddit sources as the BDFR is completely agnostic on how the data is used.
+Every post becomes a `Post` (`bdfr/post.py`): the post's JSON fields as attributes, with `author` and `subreddit` as plain names. Nothing is ever fetched for a missing field. Reading one raises `AttributeError`, so code on the download path only reads fields that Arctic Shift and the userscript provide.
 
-## The Download Process
+## The server
 
-The BDFR is organised around a central object, the RedditDownloader class. The Archiver object extends and inherits from this class.
+`bdfr serve` (`bdfr/server.py`) is a small HTTP server that needs a token on every request:
 
-1. The RedditDownloader parses all the arguments and configuration options, held in the Configuration object, and creates a variety of internal objects for use, such as the file name formatter, download filter, etc.
-2. The RedditDownloader scrapes raw submissions from Reddit via several methods relating to different sources. A source is defined as a single stream of submissions from a subreddit, multireddit, or user list.
-3. These raw submissions are passed to the DownloaderFactory class to select the specialised downloader class to use. Each of these are for a specific website or link type, with some catch-all classes like Direct.
-4. The BaseDownloader child, spawned by DownloaderFactory, takes the link and does any necessary processing to find the direct link to the actual resource.
-5. This is returned to the RedditDownloader in the form of a Resource object. This holds the URL and some other information for the final resource.
-6. The Resource is passed through the DownloadFilter instantiated in step 1.
-7. The destination file name for the Resource is calculated. If it already exists, then the Resource will be discarded.
-8. Here the actual data is downloaded to the Resource and a hash calculated which is used to find duplicates.
-9. Only then is the Resource written to the disk.
+1. `POST /jobs` validates the job (one folder directly under the served directory, at most 5000 posts) and queues it. `GET /jobs/<id>` reports per-post progress, `GET /status` and `GET /watchlist` report the queue and the watched users, and `POST /known` says which posts a folder already has (from post IDs in file names and the folder's hash store), so the userscript can mark them without downloading anything.
+2. One worker thread runs jobs one at a time. Each job copies serve's base options, points them at the job's folder, writes the given posts to a temporary `--post-json` file and, for a user job, adds that user's Arctic Shift listing (`listing_before`, `listing_after`).
+3. It runs a `Downloader` with a `progress_callback`. A job ends `failed` when the downloader recorded errors, for example a listing cut short by Arctic Shift, so callers never mistake an unread listing for "nothing new".
 
-This is the step-by-step process that the BDFR goes through to download a Reddit post.
+## The download
 
-## Adding another Supported Site
+`Downloader` (`bdfr/downloader.py`) builds on `Connector` (`bdfr/connector.py`), which builds on `HashStore` (`bdfr/hash_store.py`):
 
-This is one of the easiest changes to do with the code. First, any new class must inherit from the BaseDownloader class which provided an abstract parent to implement. However, take note of the other classes as well. Many downloaders can inherit from one another instead of just the BaseDownloader. For example, the VReddit class, used for downloading video from Reddit, inherits almost all of its code from the YouTube class. **Minimise code duplication wherever possible**.
+1. `Connector` loads the configuration file, sets up logging, opens the folder's hash store and builds `self.listings`. These are lazy generators of posts: given posts first, then each subreddit and user listing. `ArcticShift` (`bdfr/arctic_shift.py`) fetches the next page only when the previous one is used up, and looks up posts by ID 100 at a time, only when the given data isn't enough to download from.
+2. `Downloader.download()` takes each post from the listings, one at a time or in a thread pool with `--parallel`, and reports results in listing order. `--stop-at-existing` ends a listing after enough already-downloaded posts in a row, and since the listings are lazy, no further pages are requested.
+3. `_download_submission()` filters the post (IDs, users, scores, `--media-only`). Before any request, it checks whether the post is already known, by the post ID in a file name or by its link in the hash store's URL table.
+4. `DownloadFactory.pull_lever()` (`bdfr/site_downloaders/download_factory.py`) picks a site downloader by URL. Its `find_resources()` returns `Resource`s (`bdfr/resource.py`), each with the media URL and a download function.
+5. `FileNameFormatter` (`bdfr/file_name_formatter.py`) gives each resource its path. The media URL is claimed, so that a link shared by several posts downloads once per run, and then checked against the store.
+6. The resource is downloaded and hashed. Under one lock, the hash is checked for duplicates (skip or hard-link), and then the file, its hash and its URL are recorded.
 
-Once the downloader class has been written **and tests added** for it as well, then the regex string for the site's URLs can be added to the DownloaderFactory. Then additional tests must be added for the DownloadFactory to ensure that the appropriate classes are called when the right URLs are passed to the factory.
+The hash store keeps content hash → file, file → hash and media URL → hash, either as SQLite (`hashes.sqlite`, the server's default) or as three JSON files. Both modes must behave the same.
 
-## Adding Other Features
+## `bdfr rename`
 
-For a fundamentally different form of execution path for the program, such as the difference between the `archive` and `download` commands, it is best to inherit from the RedditDownloader class and override or add functionality as needed.
+`bdfr/renamer.py` renames existing files from one file scheme to another using only what is on disk. It parses the old names with a regex built from the old scheme, takes `{DATE}` from modified times, and updates the hash store to match. It makes no network requests.
+
+## Adding a supported site
+
+1. Write a class in `bdfr/site_downloaders/` that inherits from `BaseDownloader`, or from a close relative. `VReddit`, for example, reuses `Youtube`'s yt-dlp handling. It is constructed as `Cls(post, args)`, and `find_resources()` returns the post's `Resource`s.
+2. Keep it thread-safe: with `--parallel`, `find_resources()` and `Resource.download()` run in threads, so shared state (such as `Redgifs`'s token) goes behind a lock.
+3. Add its URL pattern to `DownloadFactory.pull_lever()`, and add tests for both the downloader and the factory. Tests that reach the site are marked `online`, and CI doesn't run them. Mock the HTTP calls for anything that must stay tested.
+4. Keep `Resource.url` stable once a site is supported, because existing downloads are recognised by their stored media URL.

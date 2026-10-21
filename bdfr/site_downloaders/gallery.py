@@ -2,15 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import logging
-from typing import Optional
 
 import requests
-from praw.models import Submission
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import SiteDownloaderError
+from bdfr.post import Post
 from bdfr.resource import Resource
-from bdfr.site_authenticator import SiteAuthenticator
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__)
@@ -28,10 +26,10 @@ REMOVED = {
 
 
 class Gallery(BaseDownloader):
-    def __init__(self, post: Submission, args: Configuration):
+    def __init__(self, post: Post, args: Configuration):
         super().__init__(post, args)
 
-    def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> list[Resource]:
+    def find_resources(self) -> list[Resource]:
         try:
             image_urls = self._get_links(self.post.gallery_data["items"])
         except (AttributeError, TypeError):

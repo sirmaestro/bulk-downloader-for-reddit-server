@@ -7,12 +7,11 @@ import threading
 from typing import Optional
 
 import requests
-from praw.models import Submission
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
+from bdfr.post import Post
 from bdfr.resource import Resource
-from bdfr.site_authenticator import SiteAuthenticator
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 
@@ -22,10 +21,10 @@ class Redgifs(BaseDownloader):
     _token: Optional[str] = None
     _token_lock = threading.Lock()
 
-    def __init__(self, post: Submission, args: Configuration):
+    def __init__(self, post: Post, args: Configuration):
         super().__init__(post, args)
 
-    def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> list[Resource]:
+    def find_resources(self) -> list[Resource]:
         media_urls = self._get_link(self.post.url)
         return [Resource(self.post, m, Resource.retry_download(m), None) for m in media_urls]
 

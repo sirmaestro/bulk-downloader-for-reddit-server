@@ -2,23 +2,20 @@
 # -*- coding: utf-8 -*-
 
 import logging
-from typing import Optional
-
-from praw.models import Submission
 
 from bdfr.configuration import Configuration
+from bdfr.post import Post
 from bdfr.resource import Resource
-from bdfr.site_authenticator import SiteAuthenticator
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__)
 
 
 class SelfPost(BaseDownloader):
-    def __init__(self, post: Submission, args: Configuration):
+    def __init__(self, post: Post, args: Configuration):
         super().__init__(post, args)
 
-    def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> list[Resource]:
+    def find_resources(self) -> list[Resource]:
         out = Resource(self.post, self.post.url, lambda: None, ".txt")
         out.content = self.export_to_string().encode("utf-8")
         out.create_hash()
@@ -35,13 +32,13 @@ class SelfPost(BaseDownloader):
             + self.post.selftext
             + "\n\n---\n\n"
             + "submitted to [r/"
-            + self.post.subreddit.display_name
+            + self.post.subreddit
             + "](https://www.reddit.com/r/"
-            + self.post.subreddit.display_name
+            + self.post.subreddit
             + ") by [u/"
-            + (self.post.author.name if self.post.author else "DELETED")
+            + (self.post.author or "DELETED")
             + "](https://www.reddit.com/user/"
-            + (self.post.author.name if self.post.author else "DELETED")
+            + (self.post.author or "DELETED")
             + ")"
         )
         return content
