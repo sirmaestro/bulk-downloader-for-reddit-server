@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.2
-// @description  Downloads the posts on old.reddit pages through a local `bdfr serve`, or collects them as JSON for `bdfr download --post-json`
+// @version      4.3
+// @description  Downloads the posts on old.reddit pages through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -10,6 +10,8 @@
 // @connect      127.0.0.1
 // @connect      localhost
 // @connect      old.reddit.com
+// bdfr serve on another machine (e.g. Docker on a home server): Tampermonkey asks once to allow its address
+// @connect      *
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -22,6 +24,10 @@
         subredditPages: false, // old.reddit.com/r/<name>/...
         // Links to a user's profile open their submitted posts, newest first, on every old.reddit page
         userLinksToSubmitted: true,
+        // On any old.reddit page, watched users (bdfr serve's watchlist.yaml) not synced for this many hours have their
+        // newest posts read from Reddit with your login and sent to bdfr serve, in the background
+        backgroundSync: true,
+        syncEveryHours: 6,
     };
 
     if (SETTINGS.userLinksToSubmitted) redirectUserLinks();
@@ -77,6 +83,183 @@
     const TOKEN_KEY = "bdfr-token";
     const ARCHIVE_KEY = "bdfr-full-archive";
     const DEFAULT_SERVER = "http://127.0.0.1:7635";
+
+    // --- Background sync of watched users (on every old.reddit page) ---
+    //
+    // The users on bdfr serve's watchlist (GET /watchlist) that haven't been synced for SETTINGS.syncEveryHours have
+    // their newest posts read from Reddit with your login (submitted.json, 100 per request), until 5 posts in a row
+    // are already downloaded, and the new media posts are sent to bdfr serve as one job. Reddit's listing has the
+    // gallery data, so nothing is read from the archive (bdfr serve's weekly baseline fills what Reddit no longer
+    // shows). One tab syncs at a time. Every failure is logged to the console as a warning starting "BDFR sync:", and
+    // a user that failed is tried again after an hour.
+    const SYNC_STATE_KEY = "bdfr-sync"; // user (lower case) -> { lastSuccess, lastSent } or { lastError, lastAttempt }
+    const SYNC_LOCK_KEY = "bdfr-sync-lock"; // { owner: tab, until: time } while a tab syncs
+    const SYNC_GAP_KEY = "bdfr-sync-request-gap"; // milliseconds between requests to Reddit
+    const SYNC_LOCK_MS = 2 * 60 * 1000;
+    const SYNC_RETRY_MS = 60 * 60 * 1000;
+    const SYNC_START_DELAY_MS = 1500;
+    const SYNC_STOP_AFTER_KNOWN = 5;
+    const SYNC_MAX_PAGES = 10; // Reddit only lists a user's newest 1000 posts
+    const syncTab = Math.random().toString(36).slice(2);
+    let lastRedditRead = 0;
+
+    if (SETTINGS.backgroundSync) setTimeout(backgroundSync, SYNC_START_DELAY_MS);
+
+    async function backgroundSync() {
+        if (!GM_getValue(TOKEN_KEY, "") || !takeSyncLock()) return;
+        try {
+            let watchlist;
+            try {
+                watchlist = await request("GET", "/watchlist");
+            } catch (error) {
+                console.warn(`BDFR sync: couldn't read the watchlist: ${describeError(error)}`);
+                return;
+            }
+            const syncState = GM_getValue(SYNC_STATE_KEY, {});
+            for (const user of Array.isArray(watchlist.users) ? watchlist.users : []) {
+                const key = String(user.name).toLowerCase();
+                const last = syncState[key] || {};
+                const now = Date.now();
+                if (last.lastSuccess && now - last.lastSuccess < SETTINGS.syncEveryHours * 3600 * 1000) continue;
+                if (last.lastError && now - (last.lastAttempt || 0) < SYNC_RETRY_MS) continue;
+                takeSyncLock(); // renewed for each user
+                let serverDown = false;
+                try {
+                    const sent = await syncUser(user);
+                    syncState[key] = { lastSuccess: Date.now(), lastSent: sent };
+                    if (sent) console.info(`BDFR sync: u/${user.name}: sent ${sent} new posts to bdfr serve`);
+                } catch (error) {
+                    syncState[key] = { ...last, lastError: error.message, lastAttempt: Date.now() };
+                    console.warn(`BDFR sync: u/${user.name} failed: ${describeError(error)}`, error.debug || "");
+                    serverDown = ["unreachable", "unauthorised"].includes(error.message);
+                }
+                GM_setValue(SYNC_STATE_KEY, syncState);
+                // Without the server, reading the other users from Reddit would be wasted
+                if (serverDown) break;
+            }
+        } finally {
+            releaseSyncLock();
+        }
+    }
+
+    // Whether this tab may sync: no other tab holds the lock, or it has expired. Taking it again renews it.
+    function takeSyncLock() {
+        const lock = GM_getValue(SYNC_LOCK_KEY, null);
+        if (lock && lock.owner !== syncTab && lock.until > Date.now()) return false;
+        GM_setValue(SYNC_LOCK_KEY, { owner: syncTab, until: Date.now() + SYNC_LOCK_MS });
+        return true;
+    }
+
+    function releaseSyncLock() {
+        const lock = GM_getValue(SYNC_LOCK_KEY, null);
+        if (lock && lock.owner === syncTab) GM_setValue(SYNC_LOCK_KEY, null);
+    }
+
+    // Reads the user's newest posts until SYNC_STOP_AFTER_KNOWN downloaded ones in a row, and sends the new ones.
+    // Returns how many were sent.
+    async function syncUser(user) {
+        const target = user.folder || user.name;
+        const pending = [];
+        let after = null;
+        let knownInARow = 0;
+        for (let pageNumber = 0; pageNumber < SYNC_MAX_PAGES; pageNumber++) {
+            const listing = await readSubmitted(user.name, after);
+            const posts = listing.children.map((child) => postFromListing(child && child.data)).filter(Boolean);
+            let stop = false;
+            if (posts.length) {
+                const ids = posts.map((post) => post.id);
+                const links = Object.fromEntries(posts.filter((post) => !isGallery(post))
+                    .map((post) => [post.id, post.url]));
+                const known = await request("POST", "/known", { folder: target, ids, links });
+                const had = new Set([...(known.known || []), ...(known.duplicates || [])]);
+                for (const post of posts) {
+                    if (!had.has(post.id)) {
+                        knownInARow = 0;
+                        pending.push(post);
+                    } else if (++knownInARow >= SYNC_STOP_AFTER_KNOWN) {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+            if (stop || !listing.after) break;
+            after = listing.after;
+        }
+        if (pending.length) await request("POST", "/jobs", { folder: target, posts: pending });
+        return pending.length;
+    }
+
+    // A post from Reddit's listing JSON in the form the page's posts are sent in, or null if it isn't downloaded
+    // (self posts, crossposts, links to other Reddit posts, incomplete data)
+    function postFromListing(data) {
+        if (!data || data.is_self || data.crosspost_parent) return null;
+        const post = {
+            id: data.id,
+            title: data.title,
+            author: data.author,
+            subreddit: data.subreddit,
+            created_utc: data.created_utc,
+            url: absoluteUrl(data.url_overridden_by_dest || data.url),
+            domain: data.domain || null,
+            permalink: data.permalink || null,
+            score: Number.isFinite(data.score) ? data.score : null,
+            over_18: Boolean(data.over_18),
+            link_flair_text: data.link_flair_text || null,
+            is_gallery: Boolean(data.is_gallery),
+        };
+        if (data.upvote_ratio != null) post.upvote_ratio = data.upvote_ratio;
+        if (data.gallery_data) {
+            post.gallery_data = data.gallery_data;
+            post.media_metadata = trimMediaMetadata(data.media_metadata);
+        }
+        return ignoreReason(post) ? null : post;
+    }
+
+    // One page of the user's submitted posts, newest first, read with the browser's Reddit login
+    async function readSubmitted(name, after) {
+        const wait = lastRedditRead + GM_getValue(SYNC_GAP_KEY, 2000) - Date.now();
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        lastRedditRead = Date.now();
+        const url = `https://old.reddit.com/user/${encodeURIComponent(name)}/submitted.json`
+            + "?sort=new&limit=100&raw_json=1" + (after ? `&after=${encodeURIComponent(after)}` : "");
+        return new Promise((resolve, reject) => {
+            const fail = (message, response, extra) => {
+                const error = new Error(message);
+                error.debug = debugNotes(url, [], response, extra);
+                reject(error);
+            };
+            GM_xmlhttpRequest({
+                method: "GET",
+                url,
+                anonymous: false,
+                timeout: 30000,
+                onload: (response) => {
+                    const finalUrl = response.finalUrl || "";
+                    if (/\/login/.test(finalUrl)) return fail("Reddit asked to log in", response);
+                    if (/\/over18/.test(finalUrl)) {
+                        return fail("Reddit asks to confirm you're over 18 (allow mature content in Reddit's "
+                            + "preferences)", response);
+                    }
+                    if (response.status === 404) {
+                        return fail("Reddit answered HTTP 404 (deleted or suspended user?)", response);
+                    }
+                    if (response.status !== 200) return fail(`Reddit answered HTTP ${response.status}`, response);
+                    let data = null;
+                    try {
+                        data = JSON.parse(response.responseText).data;
+                    } catch (e) {
+                        // checked below
+                    }
+                    if (!data || !Array.isArray(data.children)) {
+                        return fail("Reddit didn't answer with a listing", response);
+                    }
+                    resolve(data);
+                },
+                onerror: (response) => fail("Reddit couldn't be reached", response),
+                ontimeout: (response) => fail("Reddit didn't answer in time", response),
+            });
+        });
+    }
 
     const page = pageSource();
     if (!page) return;

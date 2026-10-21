@@ -20,8 +20,12 @@ class Harness {
         this.requests = [];
         this.unmatched = [];
         this.logs = [];
-        this.pages = { "/user/someone/submitted/": fixture("user-page.html") };
-        this.gm = { "bdfr-token": "test-token", "bdfr-server": SERVER, ...gm };
+        this.pages = {
+            "/user/someone/submitted/": fixture("user-page.html"),
+            "/": "<!doctype html><html><head><title>reddit</title></head><body class='front-page loggedin'></body></html>",
+        };
+        // No pause between the background sync's Reddit requests
+        this.gm = { "bdfr-token": "test-token", "bdfr-server": SERVER, "bdfr-sync-request-gap": 0, ...gm };
     }
 
     async setUp() {

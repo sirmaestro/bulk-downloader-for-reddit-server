@@ -1,0 +1,16 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": "t3_new0002",
+    "dist": 6,
+    "before": null,
+    "children": [
+      {"kind": "t3", "data": {"id": "new0001", "name": "t3_new0001", "title": "Newest image", "author": "someone", "subreddit": "pics", "created_utc": 1792600000, "url": "https://i.redd.it/nnnnnnnnnnnn1.jpeg", "url_overridden_by_dest": "https://i.redd.it/nnnnnnnnnnnn1.jpeg", "domain": "i.redd.it", "permalink": "/r/pics/comments/new0001/newest_image/", "is_self": false, "over_18": false, "score": 12, "upvote_ratio": 0.99, "link_flair_text": null, "selftext": "", "num_comments": 1}},
+      {"kind": "t3", "data": {"id": "self001", "name": "t3_self001", "title": "A question", "author": "someone", "subreddit": "AskReddit", "created_utc": 1792590000, "url": "https://www.reddit.com/r/AskReddit/comments/self001/a_question/", "domain": "self.AskReddit", "permalink": "/r/AskReddit/comments/self001/a_question/", "is_self": true, "over_18": false, "score": 2, "selftext": "Why?", "num_comments": 4}},
+      {"kind": "t3", "data": {"id": "xpost01", "name": "t3_xpost01", "title": "Crossposted", "author": "someone", "subreddit": "pics", "created_utc": 1792580000, "url": "/r/aww/comments/orig001/original/", "domain": "self.aww", "permalink": "/r/pics/comments/xpost01/crossposted/", "is_self": false, "crosspost_parent": "t3_orig001", "over_18": false, "score": 5}},
+      {"kind": "t3", "data": {"id": "gal0002", "name": "t3_gal0002", "title": "Gallery", "author": "someone", "subreddit": "pics", "created_utc": 1792570000, "url": "https://www.reddit.com/gallery/gal0002", "url_overridden_by_dest": "https://www.reddit.com/gallery/gal0002", "domain": "reddit.com", "permalink": "/r/pics/comments/gal0002/gallery/", "is_self": false, "is_gallery": true, "over_18": true, "score": 30, "upvote_ratio": 0.95, "link_flair_text": "OC", "gallery_data": {"items": [{"media_id": "g1bbbbbbbbbb", "id": 11}, {"media_id": "g2bbbbbbbbbb", "id": 12}]}, "media_metadata": {"g1bbbbbbbbbb": {"status": "valid", "e": "Image", "m": "image/jpg", "p": [{"y": 108, "x": 108, "u": "https://preview.redd.it/g1.jpg?width=108"}], "s": {"y": 900, "x": 900, "u": "https://preview.redd.it/g1.jpg"}, "id": "g1bbbbbbbbbb"}, "g2bbbbbbbbbb": {"status": "valid", "e": "Image", "m": "image/png", "p": [], "s": {"y": 900, "x": 900, "u": "https://preview.redd.it/g2.png"}, "id": "g2bbbbbbbbbb"}}}},
+      {"kind": "t3", "data": {"id": "kno0001", "name": "t3_kno0001", "title": "Known 1", "author": "someone", "subreddit": "pics", "created_utc": 1792560000, "url": "https://i.redd.it/kkkkkkkkkkk1.jpeg", "domain": "i.redd.it", "permalink": "/r/pics/comments/kno0001/known_1/", "is_self": false, "over_18": false, "score": 3}},
+      {"kind": "t3", "data": {"id": "new0002", "name": "t3_new0002", "title": "A video", "author": "someone", "subreddit": "videos", "created_utc": 1792550000, "url": "https://v.redd.it/vvvvvvvvvvv2", "domain": "v.redd.it", "permalink": "/r/videos/comments/new0002/a_video/", "is_self": false, "over_18": false, "score": 8}}
+    ]
+  }
+}
