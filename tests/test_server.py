@@ -54,7 +54,7 @@ def server(tmp_path: Path):
         args.stop_at_existing = 0
         download_server = DownloadServer(args, tmp_path, TOKEN)
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(download_server))
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        threading.Thread(target=httpd.serve_forever, args=(0.05,), daemon=True).start()
         yield download_server, f"http://127.0.0.1:{httpd.server_address[1]}"
         httpd.shutdown()
         httpd.server_close()

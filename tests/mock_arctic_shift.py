@@ -145,7 +145,8 @@ class MockArcticShift:
         """Serves the mock and points ArcticShift at it, without waits between requests or retries"""
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.base = f"http://127.0.0.1:{self._httpd.server_address[1]}"
-        threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
+        # A short poll interval: shutdown() waits for it (0.5 s by default, in every test)
+        threading.Thread(target=self._httpd.serve_forever, args=(0.05,), daemon=True).start()
         try:
             with (
                 patch.object(ArcticShift, "API_URL", f"{self.base}/api"),

@@ -445,7 +445,7 @@ def test_watchlist_endpoint(serve, tmp_path, clock):
     serve.scheduler = make_scheduler(serve, tmp_path, clock)
     tick(serve.scheduler, serve)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(serve))
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    threading.Thread(target=httpd.serve_forever, args=(0.05,), daemon=True).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     try:
         request = urllib.request.Request(base + "/watchlist", headers={"X-BDFR-Token": "token"})
