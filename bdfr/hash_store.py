@@ -40,6 +40,11 @@ class HashStore:
 
     Mixed into Connector, which provides self.args and self.download_directory."""
 
+    # When set, _check_hash_exists_or_add and _check_url_exists_or_add leave their changes uncommitted, for the caller
+    # to commit once per post with _commit_hash_db: a commit costs ~13 ms through a Docker Desktop bind mount, and a
+    # new file needs two or three
+    _defer_commits = False
+
     def _open_hash_store(self):
         self._hash_db = None
         self.master_hash_list = {}
@@ -161,8 +166,16 @@ class HashStore:
             except Error as e:
                 raise errors.BulkDownloaderException(f"Could not open hash DB {path}: {e}")
 
+    def _commit_hash_db(self):
+        """Commits what the per-row methods left uncommitted (see _defer_commits)"""
+        hash_db = getattr(self, "_hash_db", None)
+        if hash_db is not None and hash_db.in_transaction:
+            hash_db.commit()
+
     def close_hash_db(self):
         if self._hash_db is not None:
+            # Closing discards uncommitted changes
+            self._commit_hash_db()
             self._hash_db.close()
             self._hash_db = None
 
@@ -353,7 +366,8 @@ class HashStore:
                 cursor.execute(query, (hash, file_path))
                 query = "INSERT OR REPLACE INTO hashes_file(file_path, hash) VALUES (?, ?)"
                 cursor.execute(query, (file_path, hash))
-                self._hash_db.commit()
+                if not self._defer_commits:
+                    self._hash_db.commit()
             cursor.close()
         elif self.args.keep_hashes:
             if file_path_obj is None:
@@ -379,7 +393,8 @@ class HashStore:
             if hash is not None:
                 query = "INSERT OR IGNORE INTO hashes_url(url, hash) VALUES (?, ?)"
                 cursor.execute(query, (url, hash))
-                self._hash_db.commit()
+                if not self._defer_commits:
+                    self._hash_db.commit()
             cursor.close()
         elif self.args.keep_hashes:
             if url in self.master_url_list:

@@ -61,6 +61,8 @@ class Downloader(Connector):
     # With --parallel, submissions download in threads. Checking and changing the hash store, and writing files, is
     # done under this lock, so two threads can't both decide the same media is new.
     _store_lock = threading.RLock()
+    # The hash store's rows are committed once per submission, in _run_one
+    _defer_commits = True
     # What happened to the files of the submission a thread is downloading, for its summary line
     _outcome = threading.local()
 
@@ -201,6 +203,9 @@ class Downloader(Connector):
                 # One bad submission should not end the whole run
                 logger.exception(f"Unexpected error: {e}")
                 self._fail(f"unexpected error: {e}")
+            finally:
+                with self._store_lock:
+                    self._commit_hash_db()
         return result, self._outcome.state
 
     @staticmethod
