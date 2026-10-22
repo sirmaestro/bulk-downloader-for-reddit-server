@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import email.utils
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -65,3 +69,55 @@ def test_download_of_removed_placeholder_fails(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(requests.Session, "get", get)
     with pytest.raises(BulkDownloaderException, match="Removed from the host"):
         Resource.http_download("https://i.imgur.com/a.jpg", {})
+
+
+def answers(*responses: MagicMock) -> MagicMock:
+    return MagicMock(side_effect=list(responses))
+
+
+def rate_limited(retry_after: Optional[str] = None) -> MagicMock:
+    response = fake_response("https://i.imgur.com/a.jpg", status=429, content=b"")
+    response.headers = {"Retry-After": retry_after} if retry_after is not None else {}
+    return response
+
+
+@pytest.mark.parametrize(
+    ("parameters", "attempts", "sleeps"),
+    (
+        # With the default --max-wait-time: 60 s, then 120 s, then it gives up without waiting again
+        ({"max_wait_time": 120}, 3, [60, 120]),
+        ({"fail_fast": True}, 3, [5, 10]),
+    ),
+)
+def test_rate_limited_download_waits_only_before_another_attempt(
+    monkeypatch: pytest.MonkeyPatch, parameters: dict, attempts: int, sleeps: list[int]
+):
+    get = answers(*[rate_limited() for _ in range(attempts + 1)])
+    sleep = MagicMock()
+    monkeypatch.setattr(requests.Session, "get", get)
+    monkeypatch.setattr(time, "sleep", sleep)
+    with pytest.raises(requests.exceptions.ConnectionError, match="429"):
+        Resource.http_download("https://i.imgur.com/a.jpg", parameters)
+    assert get.call_count == attempts
+    assert [c.args[0] for c in sleep.call_args_list] == sleeps
+
+
+def test_rate_limited_download_waits_as_long_as_the_host_asks(monkeypatch: pytest.MonkeyPatch):
+    get = answers(rate_limited("7"), fake_response("https://i.imgur.com/a.jpg"))
+    sleep = MagicMock()
+    monkeypatch.setattr(requests.Session, "get", get)
+    monkeypatch.setattr(time, "sleep", sleep)
+    assert Resource.http_download("https://i.imgur.com/a.jpg", {"max_wait_time": 120}) == b"data"
+    assert [c.args[0] for c in sleep.call_args_list] == [7]
+
+
+def test_rate_limited_download_gives_up_when_the_host_asks_for_too_long(monkeypatch: pytest.MonkeyPatch):
+    later = email.utils.format_datetime(datetime.now(timezone.utc) + timedelta(hours=1), usegmt=True)
+    get = answers(rate_limited(later))
+    sleep = MagicMock()
+    monkeypatch.setattr(requests.Session, "get", get)
+    monkeypatch.setattr(time, "sleep", sleep)
+    with pytest.raises(requests.exceptions.ConnectionError):
+        Resource.http_download("https://i.imgur.com/a.jpg", {"max_wait_time": 120})
+    assert get.call_count == 1
+    sleep.assert_not_called()

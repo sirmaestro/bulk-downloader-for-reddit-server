@@ -211,7 +211,7 @@ Posts are read from Arctic Shift, newest first; nothing is requested from Reddit
 - `--max-wait-time`
     - The longest to wait between retries of a rate-limited download, in seconds (default 120); see [Rate Limiting](#rate-limiting)
 - `--fail-fast`
-    - Wait only 5 seconds and retry once after a download error, instead of waiting 60 seconds and more. Connection errors such as `[Errno 11001]` and `[WinError 10061]` fail at once
+    - Wait only 5, then 10 seconds before retrying a failed download, instead of 60 seconds and more. Connection errors such as `[Errno 11001]` and `[WinError 10061]` fail at once
 - `--imgur-originals`
     - Download Imgur originals (e.g. GIFs) rather than Imgur's MP4 conversions
 - `--imgur-fix404`
@@ -371,7 +371,7 @@ Downloader modules can be disabled with `--disable-module` or the `disabled_modu
 
 ### Rate Limiting
 
-When a site rate-limits a download, BDFR waits 60 seconds and retries, then 120 seconds, and so on up to `--max-wait-time` (or `max_wait_time`, default 120). With the default that is 180 seconds of waiting for one download; larger values make waits grow quickly. `--fail-fast` shortens this to one retry after 5 seconds.
+When a site rate-limits a download (or the connection fails), BDFR waits 60 seconds and retries, then 120 seconds, and so on while the wait is at most `--max-wait-time` (or `max_wait_time`, default 120): with the default, three attempts and 180 seconds of waiting for one download. A site's `Retry-After` is waited for instead, or the download fails at once if it asks for longer than `--max-wait-time`. `--fail-fast` waits 5 and then 10 seconds.
 
 ## Multiple Instances
 

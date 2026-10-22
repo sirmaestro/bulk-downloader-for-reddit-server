@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import _hashlib
+import email.utils
 import hashlib
 import logging
 import re
@@ -9,6 +10,7 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
@@ -86,6 +88,7 @@ class Resource:
         else:
             max_wait_time = 300 if not fail_fast else 10
         while True:
+            retry_after = None
             try:
                 response = http_session().get(url, headers=headers, timeout=120)
                 if response.history and response.url in REMOVED_PLACEHOLDERS:
@@ -93,19 +96,33 @@ class Resource:
                 if re.match(r"^2\d{2}", str(response.status_code)) and response.content:
                     return response.content
                 elif response.status_code in (408, 429):
+                    retry_after = Resource._retry_after(response)
                     raise requests.exceptions.ConnectionError(f"Response code {response.status_code}")
                 else:
                     raise BulkDownloaderException(
                         f"Unrecoverable error requesting resource: HTTP Code {response.status_code}"
                     )
             except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
-                logger.warning(f"Error occured downloading from {url}, waiting {current_wait_time} seconds: {e}")
                 if fail_fast and ("[Errno 11001]" in str(e) or "[WinError 10061]" in str(e)):
                     # getaddrinfo failed #No connection could be made because the target machine actively refused it
                     raise
-                time.sleep(current_wait_time)
-                if current_wait_time < max_wait_time:
-                    current_wait_time += 60 if not fail_fast else 5
-                else:
+                # Only waits when another attempt follows, and gives up at once when the host asks for a longer wait
+                # (Retry-After) than allowed
+                if current_wait_time > max_wait_time or (retry_after is not None and retry_after > max_wait_time):
                     logger.error(f"Max wait time exceeded for resource at url {url}")
                     raise
+                wait = current_wait_time if retry_after is None else retry_after
+                logger.warning(f"Error occured downloading from {url}, waiting {wait:g} seconds: {e}")
+                time.sleep(wait)
+                current_wait_time += 60 if not fail_fast else 5
+
+    @staticmethod
+    def _retry_after(response: requests.Response) -> Optional[float]:
+        """The seconds a 408 or 429 response's Retry-After header asks to wait, if it gives any"""
+        value = response.headers.get("Retry-After", "").strip()
+        if value.isdigit():
+            return float(value)
+        try:
+            return max(0.0, (email.utils.parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+        except TypeError, ValueError:
+            return None
