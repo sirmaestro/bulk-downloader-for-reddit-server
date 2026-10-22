@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import email.utils
+import hashlib
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock
 
@@ -11,7 +13,7 @@ import pytest
 import requests
 
 from bdfr.exceptions import BulkDownloaderException
-from bdfr.resource import Resource
+from bdfr.resource import TEMP_PREFIX, Resource
 
 
 @pytest.mark.parametrize(
@@ -110,3 +112,58 @@ def test_rate_limited_download_gives_up_when_the_host_asks_for_too_long(monkeypa
         Resource.http_download("https://i.imgur.com/a.jpg", {"max_wait_time": 120})
     assert get.call_count == 1
     sleep.assert_not_called()
+
+
+def streamed_response(chunks: list, status: int = 200) -> MagicMock:
+    """A streamed response giving chunks; an exception among them is raised when reached"""
+    response = MagicMock(url="https://i.redd.it/a.jpg", status_code=status, history=[])
+
+    def iter_content(_size):
+        for chunk in chunks:
+            if isinstance(chunk, Exception):
+                raise chunk
+            yield chunk
+
+    response.iter_content = iter_content
+    response.__enter__.return_value = response
+    return response
+
+
+def temp_files(directory: Path) -> list[Path]:
+    return list(directory.glob(f"{TEMP_PREFIX}*"))
+
+
+def test_download_streams_to_a_temporary_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    get = MagicMock(return_value=streamed_response([b"ab", b"cd"]))
+    monkeypatch.setattr(requests.Session, "get", get)
+    resource = Resource(MagicMock(), "https://i.redd.it/a.jpg", Resource.retry_download("https://i.redd.it/a.jpg"))
+    resource.download({"temp_dir": tmp_path})
+    assert get.call_args.kwargs["stream"] is True
+    assert resource.content is None
+    assert resource.hash.hexdigest() == hashlib.md5(b"abcd").hexdigest()
+    assert [p.read_bytes() for p in temp_files(tmp_path)] == [b"abcd"]
+    resource.save(tmp_path / "a.jpg")
+    assert (tmp_path / "a.jpg").read_bytes() == b"abcd" and temp_files(tmp_path) == []
+
+
+def test_discarded_download_leaves_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(requests.Session, "get", MagicMock(return_value=streamed_response([b"abcd"])))
+    resource = Resource(MagicMock(), "https://i.redd.it/a.jpg", Resource.retry_download("https://i.redd.it/a.jpg"))
+    resource.download({"temp_dir": tmp_path})
+    resource.discard()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_broken_stream_is_retried_without_leftovers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    broken = streamed_response([b"ab", requests.exceptions.ChunkedEncodingError("cut off")])
+    monkeypatch.setattr(requests.Session, "get", MagicMock(side_effect=[broken, streamed_response([b"abcd"])]))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    downloaded = Resource.http_download("https://i.redd.it/a.jpg", {"temp_dir": tmp_path})
+    assert [p.read_bytes() for p in temp_files(tmp_path)] == [b"abcd"] and downloaded.path.exists()
+
+
+def test_empty_stream_fails_without_leftovers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(requests.Session, "get", MagicMock(return_value=streamed_response([])))
+    with pytest.raises(BulkDownloaderException, match="no content"):
+        Resource.http_download("https://i.redd.it/a.jpg", {"temp_dir": tmp_path})
+    assert temp_files(tmp_path) == []

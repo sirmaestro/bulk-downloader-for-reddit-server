@@ -20,6 +20,7 @@ from bdfr import logs
 from bdfr.configuration import Configuration
 from bdfr.connector import Connector
 from bdfr.post import Post
+from bdfr.resource import TEMP_PREFIX, TEMP_SUFFIX
 from bdfr.site_downloaders.download_factory import DownloadFactory
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,7 @@ class Downloader(Connector):
         return False, consecutive_existing
 
     def download(self):
+        self._remove_stale_downloads()
         totals = Counter()
         number = 0
         done = set()
@@ -186,6 +188,18 @@ class Downloader(Connector):
         logger.info(self.arctic_shift.summary())
         self._hash_list_save(False)
         self.close_hash_db()
+
+    # Downloads in progress older than this are left from a run that was stopped
+    STALE_DOWNLOAD_SECONDS = 24 * 3600
+
+    def _remove_stale_downloads(self):
+        """Deletes temporary download files a stopped run left in the download folder"""
+        cutoff = time.time() - self.STALE_DOWNLOAD_SECONDS
+        for path in Path(self.download_directory).glob(f"{TEMP_PREFIX}*{TEMP_SUFFIX}"):
+            with contextlib.suppress(OSError):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    logger.debug(f"Deleted {path.name}, left by a stopped run")
 
     @staticmethod
     def result_label(result: Optional[bool], outcome: dict) -> str:
@@ -539,7 +553,14 @@ class Downloader(Connector):
                 continue
             try:
                 try:
-                    res.download({"max_wait_time": self.args.max_wait_time, "fail_fast": self.args.fail_fast})
+                    # Written straight to a temporary file in the destination folder, not held in memory
+                    res.download(
+                        {
+                            "max_wait_time": self.args.max_wait_time,
+                            "fail_fast": self.args.fail_fast,
+                            "temp_dir": destination.parent,
+                        }
+                    )
                 except errors.BulkDownloaderException as e:
                     return self._fail(f"could not download {res.url}: {e}")
                 # The hash store is read and changed one thread at a time; the file is written outside the lock
@@ -583,8 +604,7 @@ class Downloader(Connector):
                                     )
                     self._writing.add(resource_hash)
                 try:
-                    with destination.open("wb") as file:
-                        file.write(res.content)
+                    res.save(destination)
                     creation_time = time.mktime(datetime.fromtimestamp(submission.created_utc).timetuple())
                     os.utime(destination, (creation_time, creation_time))
                     logger.debug(f"Wrote {destination}")
@@ -610,6 +630,8 @@ class Downloader(Connector):
                     logger.log(logs.TRACE, f"Hash of {destination.name}: {resource_hash}")
                     already_downloaded = False
             finally:
+                # A download that wasn't kept (a duplicate, a failure) leaves no temporary file behind
+                res.discard()
                 self._release(res.url)
         if len(content) == 1:
             self._remember_post_link(submission, content[0].url)

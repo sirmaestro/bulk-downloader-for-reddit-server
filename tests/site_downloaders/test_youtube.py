@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import hashlib
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock
@@ -54,3 +55,13 @@ def test_video_details_are_read_once(video_host):
     assert resources[0].content == VIDEO
     # Downloading reuses the details: only the file itself is requested again
     assert [r for r in requests[read_details:] if r[0] == "GET"] == [("GET", "/clip.mp4")]
+
+
+def test_video_is_copied_next_to_its_destination(video_host, tmp_path):
+    url, _requests = video_host
+    resource = Youtube(Mock(url=url), Configuration()).find_resources()[0]
+    resource.download({"temp_dir": tmp_path})
+    assert resource.content is None and resource.file.parent == tmp_path
+    assert resource.hash.hexdigest() == hashlib.md5(VIDEO).hexdigest()
+    resource.save(tmp_path / "clip.mp4")
+    assert [p.name for p in tmp_path.iterdir()] == ["clip.mp4"]

@@ -6,14 +6,14 @@ import logging
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import yt_dlp
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import NotADownloadableLinkError, SiteDownloaderError
 from bdfr.post import Post
-from bdfr.resource import Resource
+from bdfr.resource import DownloadedFile, Resource
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class Youtube(BaseDownloader):
         ytdl_options["quiet"] = True
         ytdl_options["logger"] = yt_logger
 
-        def download(_: dict) -> bytes:
+        def download(download_parameters: dict) -> Union[bytes, DownloadedFile]:
             with tempfile.TemporaryDirectory() as temp_dir:
                 download_path = Path(temp_dir).resolve()
                 ytdl_options["outtmpl"] = str(download_path) + "/" + "test.%(ext)s"
@@ -60,9 +60,11 @@ class Youtube(BaseDownloader):
                     downloaded_file = downloaded_files[0]
                 else:
                     raise NotADownloadableLinkError(f"No media exists in the URL {url}")
+                if destination_dir := download_parameters.get("temp_dir"):
+                    # Copied next to its destination, so it's renamed into place
+                    return DownloadedFile.copy_from(downloaded_file, Path(destination_dir))
                 with downloaded_file.open("rb") as file:
-                    content = file.read()
-                return content
+                    return file.read()
 
         return download
 

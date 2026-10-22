@@ -13,6 +13,7 @@ from typing import Optional
 
 from bdfr import exceptions as errors
 from bdfr import logs
+from bdfr.resource import TEMP_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -310,9 +311,9 @@ class HashStore:
 
     @staticmethod
     def _is_own_file(name: str) -> bool:
-        """BDFR's hash stores, their backups and `bdfr rename` undo lists live in the download directory but are not
-        downloads"""
-        own = ("hash_list.json", "hash_file_list.json", "hash_url_list.json", "bdfr-rename-")
+        """BDFR's hash stores, their backups, `bdfr rename` undo lists and downloads in progress live in the download
+        directory but are not downloads"""
+        own = ("hash_list.json", "hash_file_list.json", "hash_url_list.json", "bdfr-rename-", TEMP_PREFIX)
         return name.startswith(own) or name.startswith(HASH_DB_NAME)
 
     def _hashed_files_in_db(self) -> Optional[set[str]]:

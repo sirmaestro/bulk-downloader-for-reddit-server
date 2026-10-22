@@ -4,6 +4,7 @@
 """serve jobs run with the real downloader against a mock Arctic Shift (tests/mock_arctic_shift.py)"""
 
 import importlib.resources
+import os
 import shutil
 import time
 from pathlib import Path
@@ -12,7 +13,7 @@ import pytest
 
 from bdfr.__main__ import SERVE_DEFAULTS
 from bdfr.configuration import Configuration
-from bdfr.resource import Resource
+from bdfr.resource import TEMP_PREFIX, TEMP_SUFFIX, Resource
 from bdfr.retries import HOUR, RetryList
 from bdfr.scheduler import BaselineScheduler
 from bdfr.server import DownloadServer, Job
@@ -214,3 +215,20 @@ def test_failed_post_is_retried_without_archive_requests(
     assert len(files(serve, "someone")) == 1
     assert archive.requests == []
     assert serve.status()["retries"] == {"waiting": 0, "given_up": 0}
+
+
+def test_downloads_leave_no_temporary_files(serve: DownloadServer, archive: MockArcticShift):
+    """Downloads go through temporary files in the folder: kept ones are renamed into place, duplicates deleted, and
+    ones a stopped run left behind are cleared once they are a day old"""
+    folder = serve.root / "someone"
+    folder.mkdir()
+    stale, recent = folder / f"{TEMP_PREFIX}old{TEMP_SUFFIX}", folder / f"{TEMP_PREFIX}new{TEMP_SUFFIX}"
+    stale.write_bytes(b"left over")
+    recent.write_bytes(b"maybe another run's")
+    os.utime(stale, (time.time() - 2 * 24 * 3600,) * 2)
+    first, second = archive.add_post("abc0001", NOW), archive.add_post("abc0002", NOW - 60)
+    archive.media["abc0002.jpg"] = archive.media["abc0001.jpg"]
+    job = run(serve, {"folder": "someone", "posts": [first, second]})
+    assert job.results == {"abc0001": "new", "abc0002": "duplicate"}
+    assert files(serve, "someone") == [p.name for p in folder.glob("*abc0001*")]
+    assert sorted(p.name for p in folder.glob(f"{TEMP_PREFIX}*")) == [recent.name]
