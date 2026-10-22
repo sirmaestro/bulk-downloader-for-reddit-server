@@ -75,4 +75,5 @@ black and isort (settings in `pyproject.toml`, line length 120) format everythin
 ## Known issues (not yet fixed)
 
 - Hash store: JSON mode mixes `str` and `Path` values; SQLite commits once per row.
+- `FileNameFormatter.limit_file_name_length` subtracts the folder's length twice, so names in deep folders are shorter than the path limit needs (only noticeable on Windows, 260); fixing it would rename long-titled files, so it stays. A folder too deep for any name gives just the ending.
 - Files shortened before `format_path` protected the post ID at the end of a name (any length) may lack their ID; they keep that name (it is reused when it exists), so `/known` only recognises them by link.

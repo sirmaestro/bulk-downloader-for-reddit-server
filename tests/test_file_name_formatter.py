@@ -3,6 +3,7 @@
 
 import platform
 import sys
+import threading
 import unittest.mock
 from datetime import datetime
 from pathlib import Path
@@ -331,3 +332,17 @@ def test_windows_max_path(tmp_path: Path):
             result = FileNameFormatter.limit_file_name_length(mock, "test" * 100, "_1.png", tmp_path)
             assert len(str(result)) <= 260
             assert len(result.name) <= (260 - len(str(tmp_path)))
+
+
+def test_shortening_stops_when_no_name_fits(tmp_path: Path, test_formatter: FileNameFormatter):
+    # A folder so deep that no name fits used to shorten the name forever (it hung the tests on Windows when pytest's
+    # temporary folder was long)
+    test_formatter.max_path = len(str(tmp_path.resolve())) + 5
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(test_formatter.limit_file_name_length("a" * 50, ".jpg", tmp_path)), daemon=True
+    )
+    worker.start()
+    worker.join(5)
+    assert result, "limit_file_name_length did not return"
+    assert result[0].name == ".jpg"

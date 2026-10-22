@@ -147,7 +147,8 @@ class FileNameFormatter:
         max_path_length = max_path - len(ending) - len(str(root)) - 1
 
         out = Path(root, filename + ending)
-        while any(
+        # Stops at an empty name: a folder too deep for any name to fit would otherwise loop forever
+        while filename and any(
             [
                 len(filename) > max_file_part_length_chars,
                 len(filename.encode("utf-8")) > max_file_part_length_bytes,
