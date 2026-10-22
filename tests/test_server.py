@@ -113,7 +113,7 @@ def test_posts_job(server, tmp_path: Path):
     job = wait_for(base, job["id"])
     assert job["state"] == "done"
     assert job["results"] == {"a": "new", "b": "existing", "c": "skipped"}
-    assert job["counts"] == {"existing": 1, "new": 1, "duplicate": 0, "skipped": 1}
+    assert job["counts"] == {"existing": 1, "new": 1, "duplicate": 0, "skipped": 1, "failed": 0}
     args, post_ids = FakeDownloader.runs[0]
     assert post_ids == ["a", "b", "c"]
     assert Path(args.directory) == tmp_path / "some user"

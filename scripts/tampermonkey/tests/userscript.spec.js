@@ -55,6 +55,22 @@ test.describe("downloading a user page", () => {
     });
 });
 
+test.describe("job results", () => {
+    test("failed posts are marked and counted apart from skipped ones; unknown labels show as skipped", async () => {
+        harness.on("GET", BY_ID, { json: JSON.parse(fixture("by_id-gallery.json")) });
+        harness.serve("GET", "/jobs/job1", {
+            json: { id: "job1", state: "done", ...counts({ new: 1, skipped: 1, failed: 1 }), results: { img0001: "new", gal0001: "failed", vid0001: "skipped", old0001: "something-new" } },
+        });
+        const page = await harness.open();
+        await download(page);
+        await expect(status(page)).toHaveText(/^Done 3 · 1 new · 0 had · 1 skipped · 1 failed/);
+        await expect(page.locator("#thing_t3_gal0001 .bdfr-mark")).toHaveText("✖");
+        await expect(page.locator("#thing_t3_vid0001 .bdfr-mark")).toHaveText("!");
+        await expect(page.locator("#thing_t3_old0001 .bdfr-mark")).toHaveText("!");
+        expect(harness.warnings()).toEqual([]);
+    });
+});
+
 test.describe("reading galleries from Reddit fails", () => {
     const cases = [
         ["logged out (redirected to the login page)", {

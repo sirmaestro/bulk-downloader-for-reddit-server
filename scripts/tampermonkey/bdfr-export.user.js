@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.9
+// @version      4.10
 // @description  Downloads the posts on old.reddit pages through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @grant        GM_getValue
@@ -74,7 +74,8 @@
         new: ["✔", "#8bc34a", "Downloaded"],
         existing: ["✔", "#8a8a8a", "Already downloaded"],
         duplicate: ["≡", "#8a8a8a", "Same media as something already downloaded (re-uploaded under another link)"],
-        skipped: ["!", "#ffb74d", "Skipped: filtered out or failed (the reason is in serve_log.txt)"],
+        skipped: ["!", "#ffb74d", "Skipped: filtered out or nothing to download (the reason is in serve_log.txt)"],
+        failed: ["✖", "#e57373", "Failed (the reason is in serve_log.txt); Download tries it again"],
         fetching: ["⋯", "#8a8a8a", "Reading the gallery's images from Reddit"],
         ignored: ["–", "#6a6a6a", "Ignored"],
     };
@@ -935,12 +936,14 @@
             }
             const c = job.counts;
             const duplicates = c.duplicate || 0;
-            const done = c.new + c.existing + duplicates + c.skipped;
+            const failed = c.failed || 0; // older servers count failures as skipped
+            const done = c.new + c.existing + duplicates + c.skipped + failed;
             const progress = job.total ? `${done}/${job.total}` : `${done}`;
             const prefix = { queued: "Queued", running: "Downloading", done: "Done", failed: "Failed" }[job.state];
             const reading = jobNote && job.state === "running" ? ` (page ${jobNote})` : "";
             setStatus(`${prefix}${reading} ${progress} · ${c.new} new · ${c.existing} had`
                 + (duplicates ? ` · ${duplicates} duplicates` : "") + ` · ${c.skipped} skipped`
+                + (failed ? ` · ${failed} failed` : "")
                 + (job.error ? ` · ${job.error}` : "") + (galleryNote ? ` · ${galleryNote}` : ""));
             Object.assign(state, job.results);
             applyMarks();
@@ -973,7 +976,8 @@
                 mark.style.cssText = "margin-left:6px;font-size:11px;font-weight:bold";
                 title.after(mark);
             }
-            const [symbol, colour, tip] = MARKS[label];
+            // A label from a newer server than this script shows as skipped
+            const [symbol, colour, tip] = MARKS[label] || MARKS.skipped;
             mark.textContent = symbol;
             mark.style.color = colour;
             mark.title = `BDFR: ${tip}` + (label === "ignored" && ignoredWhy[id] ? `: ${ignoredWhy[id]}` : "");

@@ -75,7 +75,7 @@ class Downloader(Connector):
 
     def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = (), log_file: bool = True):
         super().__init__(args, logging_handlers, log_file)
-        # Called with (submission ID, result of _download_submission, label from result_label) after each
+        # Called with (submission ID, result of _download_submission, label from log_label) after each
         # submission, in listing order; used by `bdfr serve`
         self.progress_callback: Optional[Callable[[str, Optional[bool], str], None]] = None
         # Why listings were stopped before their end in download(); the run didn't see everything it was asked to
@@ -123,7 +123,7 @@ class Downloader(Connector):
                     if isinstance(created, (int, float)) and (self.newest_post is None or created > self.newest_post):
                         self.newest_post = created
                     if self.progress_callback:
-                        self.progress_callback(submission.id, result, self.result_label(result, outcome))
+                        self.progress_callback(submission.id, result, self.log_label(result, outcome))
                     if not stop_enabled:
                         return False
                     stop, consecutive_existing = self._stop_at_existing_reached(result, consecutive_existing)

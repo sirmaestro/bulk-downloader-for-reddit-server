@@ -157,7 +157,7 @@ def test_posts_for_users_without_archive_checks_are_not_looked_up(
     post.pop("gallery_data", None)
     job = run(serve, {"folder": "someone", "posts": [post]})
     assert job.state == "done"
-    assert job.results == {"abc0001": "skipped"}
+    assert job.results == {"abc0001": "failed"}
     assert archive.requests == []
 
 

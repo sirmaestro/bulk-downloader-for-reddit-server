@@ -42,7 +42,7 @@ FOLDER_PATTERN = re.compile(r"[\w\-. ]{1,100}")
 USER_PATTERN = re.compile(r"[\w-]{1,30}")
 POST_ID_PATTERN = re.compile(r"[a-z0-9]{3,13}")  # also keeps gallery indexes (_1, _2) from matching
 RESULT_LABELS = {True: "existing", False: "new", None: "skipped"}
-LABELS = ("new", "existing", "duplicate", "skipped")
+LABELS = ("new", "existing", "duplicate", "skipped", "failed")
 
 
 class Job:

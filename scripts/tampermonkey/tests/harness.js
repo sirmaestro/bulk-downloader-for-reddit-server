@@ -147,7 +147,7 @@ class Harness {
 }
 
 function counts(over = {}) {
-    return { counts: { new: 0, existing: 0, duplicate: 0, skipped: 0, ...over } };
+    return { counts: { new: 0, existing: 0, duplicate: 0, skipped: 0, failed: 0, ...over } };
 }
 
 function parse(data) {
