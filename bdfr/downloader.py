@@ -68,6 +68,10 @@ class Downloader(Connector):
     # With --parallel, submissions download in threads. Checking and changing the hash store, and writing files, is
     # done under this lock, so two threads can't both decide the same media is new.
     _store_lock = threading.RLock()
+    # Hashes of files being written outside _store_lock, and the condition to wait on until they are stored, so a
+    # second download of the same content is still recognised as a duplicate
+    _writing: set[str] = set()
+    _written = threading.Condition(_store_lock)
     # The hash store's rows are committed once per submission, in _run_one
     _defer_commits = True
     # What happened to the files of the submission a thread is downloading, for its summary line
@@ -538,9 +542,11 @@ class Downloader(Connector):
                     res.download({"max_wait_time": self.args.max_wait_time, "fail_fast": self.args.fail_fast})
                 except errors.BulkDownloaderException as e:
                     return self._fail(f"could not download {res.url}: {e}")
-                # From here on, the hash store is read and changed, so one thread at a time
+                # The hash store is read and changed one thread at a time; the file is written outside the lock
                 with self._store_lock:
                     resource_hash = res.hash.hexdigest()
+                    while resource_hash in self._writing:
+                        self._written.wait()
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     if (
                         (self.args.keep_hashes or self.args.keep_hashes_db)
@@ -575,19 +581,26 @@ class Downloader(Connector):
                                     logger.warning(
                                         f"Could not hard link {destination} to {hashed_item}, writing a copy: {e}"
                                     )
-                    try:
-                        with destination.open("wb") as file:
-                            file.write(res.content)
-                        logger.debug(f"Wrote {destination}")
-                    except OSError as e:
-                        # A partly written file would make the post look downloaded (its ID is in the name)
-                        with contextlib.suppress(OSError):
-                            destination.unlink(missing_ok=True)
-                        return self._fail(f"could not write {destination.name}: {e}")
-                    self._files["written"] += 1
-                    self._folder_post_ids().add(submission.id)
+                    self._writing.add(resource_hash)
+                try:
+                    with destination.open("wb") as file:
+                        file.write(res.content)
                     creation_time = time.mktime(datetime.fromtimestamp(submission.created_utc).timetuple())
                     os.utime(destination, (creation_time, creation_time))
+                    logger.debug(f"Wrote {destination}")
+                except OSError as e:
+                    # A partly written file would make the post look downloaded (its ID is in the name)
+                    with contextlib.suppress(OSError):
+                        destination.unlink(missing_ok=True)
+                    with self._written:
+                        self._writing.discard(resource_hash)
+                        self._written.notify_all()
+                    return self._fail(f"could not write {destination.name}: {e}")
+                with self._written:
+                    self._writing.discard(resource_hash)
+                    self._written.notify_all()
+                    self._files["written"] += 1
+                    self._folder_post_ids().add(submission.id)
                     if self.args.keep_hashes or self.args.keep_hashes_db:
                         self._check_hash_exists_or_add(destination, resource_hash)
                     else:

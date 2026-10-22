@@ -4,6 +4,7 @@
 import contextlib
 import io
 import logging
+import os
 import time
 from collections import Counter
 from pathlib import Path
@@ -394,3 +395,26 @@ def test_media_only(tmp_path: Path):
     with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=FakeDownloader):
         downloader.download()
     assert seen == [("sel1111", "skipped"), ("xpo1111", "skipped"), ("med1111", "new")]
+
+
+def test_same_content_written_at_once_is_a_duplicate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Files are written outside the store lock; a second post with the same content must wait for the first file
+    to be stored, and is then a duplicate rather than a second copy"""
+    posts = [post(f"{n}aa1111", f"https://i.redd.it/{n}.jpg", score=10) for n in range(2)]
+    monkeypatch.setitem(CONTENT, "https://i.redd.it/0.jpg", b"same")
+    monkeypatch.setitem(CONTENT, "https://i.redd.it/1.jpg", b"same")
+    utime = os.utime
+
+    def slow_utime(*args, **kwargs):
+        time.sleep(0.3)
+        utime(*args, **kwargs)
+
+    monkeypatch.setattr(os, "utime", slow_utime)
+    labels = {}
+    with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=FakeDownloader):
+        downloader = make_downloader(tmp_path, posts)
+        downloader.args.parallel = 2
+        downloader.progress_callback = lambda post_id, result, label: labels.update({post_id: label})
+        downloader.download()
+    assert sorted(labels.values()) == ["duplicate", "new"]
+    assert len(list(tmp_path.glob("*.jpg"))) == 1
