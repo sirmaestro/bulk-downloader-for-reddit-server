@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import copy
 import logging
 import tempfile
 from collections.abc import Callable
@@ -28,12 +29,13 @@ class Youtube(BaseDownloader):
             "playlistend": 1,
             "nooverwrites": True,
         }
-        download_function = self._download_video(ytdl_options)
-        extension = self.get_video_attributes(self.post.url)["ext"]
-        res = Resource(self.post, self.post.url, download_function, extension)
+        info = self.get_video_attributes(self.post.url)
+        res = Resource(self.post, self.post.url, self._download_video(ytdl_options, info=info), info["ext"])
         return [res]
 
-    def _download_video(self, ytdl_options: dict, url: Optional[str] = None) -> Callable:
+    def _download_video(self, ytdl_options: dict, url: Optional[str] = None, info: Optional[dict] = None) -> Callable:
+        """The download function for a video. Given the video's details from get_video_attributes, it downloads from
+        those instead of reading them again"""
         url = url or self.post.url
         yt_logger = logging.getLogger("youtube-dl")
         yt_logger.setLevel(logging.CRITICAL)
@@ -46,7 +48,10 @@ class Youtube(BaseDownloader):
                 ytdl_options["outtmpl"] = str(download_path) + "/" + "test.%(ext)s"
                 try:
                     with yt_dlp.YoutubeDL(ytdl_options) as ydl:
-                        ydl.download([url])
+                        if info is None:
+                            ydl.download([url])
+                        else:
+                            ydl.process_ie_result(copy.deepcopy(info), download=True)
                 except yt_dlp.DownloadError as e:
                     raise SiteDownloaderError(f"Youtube download failed: {e}")
 

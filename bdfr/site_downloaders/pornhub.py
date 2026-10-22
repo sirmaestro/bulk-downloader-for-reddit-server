@@ -21,15 +21,6 @@ class PornHub(Youtube):
             "format": "bestvideo*+bestaudio/best",
             "nooverwrites": True,
         }
-        if video_attributes := super().get_video_attributes(self.post.url):
-            extension = video_attributes["ext"]
-        else:
+        if not (info := super().get_video_attributes(self.post.url)):
             raise SiteDownloaderError()
-
-        out = Resource(
-            self.post,
-            self.post.url,
-            super()._download_video(ytdl_options),
-            extension,
-        )
-        return [out]
+        return [Resource(self.post, self.post.url, super()._download_video(ytdl_options, info=info), info["ext"])]

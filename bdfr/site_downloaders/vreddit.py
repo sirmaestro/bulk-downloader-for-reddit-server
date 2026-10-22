@@ -23,10 +23,9 @@ class VReddit(Youtube):
             "nooverwrites": True,
         }
         video_url = self._find_video_url()
-        download_function = self._download_video(ytdl_options, video_url)
-        extension = self.get_video_attributes(video_url)["ext"]
+        info = self.get_video_attributes(video_url)
         # The resource keeps the post's URL so existing downloads and stored URLs still match
-        res = Resource(self.post, self.post.url, download_function, extension)
+        res = Resource(self.post, self.post.url, self._download_video(ytdl_options, video_url, info), info["ext"])
         return [res]
 
     def _find_video_url(self) -> str:

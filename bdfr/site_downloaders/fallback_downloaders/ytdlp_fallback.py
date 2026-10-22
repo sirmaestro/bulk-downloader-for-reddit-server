@@ -20,13 +20,8 @@ class YtdlpFallback(BaseFallbackDownloader, Youtube):
         super().__init__(post, args)
 
     def find_resources(self) -> list[Resource]:
-        out = Resource(
-            self.post,
-            self.post.url,
-            super()._download_video({}),
-            super().get_video_attributes(self.post.url)["ext"],
-        )
-        return [out]
+        info = super().get_video_attributes(self.post.url)
+        return [Resource(self.post, self.post.url, super()._download_video({}, info=info), info["ext"])]
 
     @staticmethod
     @functools.cache
