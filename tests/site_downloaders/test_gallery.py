@@ -4,10 +4,10 @@
 from unittest.mock import MagicMock
 
 import pytest
-import requests
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import SiteDownloaderError
+from bdfr.resource import http_session
 from bdfr.site_downloaders.gallery import Gallery
 
 
@@ -42,6 +42,6 @@ def test_find_image_tries_jpg_first(answers: dict, expected, tried: list[str], m
         asked.append(url)
         return MagicMock(status_code=answers.get(url[url.rindex(".") :], 404))
 
-    monkeypatch.setattr(requests, "head", head)
+    monkeypatch.setattr(http_session(), "head", head)
     assert Gallery.find_image("abc") == expected
     assert asked == [f"https://i.redd.it/abc{extension}" for extension in tried]

@@ -4,12 +4,10 @@
 import logging
 from typing import Optional
 
-import requests
-
 from bdfr.configuration import Configuration
 from bdfr.exceptions import SiteDownloaderError
 from bdfr.post import Post
-from bdfr.resource import Resource
+from bdfr.resource import Resource, http_session
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__)
@@ -66,7 +64,7 @@ class Gallery(BaseDownloader):
         possible_extensions = (".jpg", ".png", ".gif", ".gifv", ".jpeg")
         for extension in possible_extensions:
             test_url = f"https://i.redd.it/{image_id}{extension}"
-            response = requests.head(test_url, timeout=30)
+            response = http_session().head(test_url, timeout=30)
             if response.status_code == 200:
                 return test_url
         return None

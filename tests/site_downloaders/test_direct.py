@@ -4,10 +4,10 @@
 from unittest.mock import Mock
 
 import pytest
-import requests
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import SiteDownloaderError
+from bdfr.resource import http_session
 from bdfr.site_downloaders.direct import Direct
 
 
@@ -19,7 +19,7 @@ def test_bare_reddit_image_gets_extension(monkeypatch: pytest.MonkeyPatch):
         tried.append(url)
         return Mock(status_code=200 if url.endswith(".png") else 404)
 
-    monkeypatch.setattr(requests, "head", head)
+    monkeypatch.setattr(http_session(), "head", head)
     mock_submission = Mock()
     mock_submission.url = "https://i.redd.it/ndmbdgcpf9hg1"
     resources = Direct(mock_submission, Configuration()).find_resources()
@@ -29,7 +29,7 @@ def test_bare_reddit_image_gets_extension(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_bare_reddit_image_gone(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(requests, "head", lambda url, **kwargs: Mock(status_code=404))
+    monkeypatch.setattr(http_session(), "head", lambda url, **kwargs: Mock(status_code=404))
     mock_submission = Mock()
     mock_submission.url = "https://i.redd.it/ndmbdgcpf9hg1"
     with pytest.raises(SiteDownloaderError, match="not found on i.redd.it"):
