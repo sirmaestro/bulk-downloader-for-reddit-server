@@ -154,3 +154,52 @@ test.describe("talking to bdfr serve fails", () => {
         expect(harness.warnings()).toContainEqual(expect.stringMatching(/job1 failed.*HTTP 503/));
     });
 });
+
+test.describe("the Status view", () => {
+    function serverView(page) {
+        return page.locator(".bdfr-server-view");
+    }
+
+    test("shows the queue, failed posts, recent jobs and watchlist problems", async () => {
+        harness.serve("GET", "/status", { json: { version: "3.1.0", running: "job2", queued: 3, retries: { waiting: 4, given_up: 1 } } });
+        harness.serve("GET", "/jobs", {
+            json: {
+                jobs: [
+                    { id: "job2", folder: "someone", user: "someone", total: null, state: "running", error: null, retry: false, created: 1790000000, ...counts({ new: 2 }) },
+                    { id: "job1", folder: "other", user: null, total: 5, state: "failed", error: "Arctic Shift unavailable", retry: true, created: 1789990000, ...counts({ existing: 3, failed: 2 }) },
+                ],
+            },
+        });
+        harness.serve("GET", "/watchlist", { json: { enabled: true, users: [{ name: "broken", last_error: "HTTP 422" }, { name: "fine" }], gone: [{ name: "left" }] } });
+        const page = await harness.open();
+        await expect(serverView(page)).toBeHidden();
+        await page.getByRole("button", { name: "Status" }).click();
+        const view = serverView(page);
+        await expect(view).toContainText("bdfr serve 3.1.0 · running a job · 3 queued · failed posts: 4 to retry, 1 given up");
+        await expect(view).toContainText(/someone: u\/someone · running · 2 new/);
+        await expect(view).toContainText(/other: 5 posts \(retry\) · failed · 3 had, 2 failed · Arctic Shift unavailable/);
+        await expect(view).toContainText("u/broken: HTTP 422");
+        await expect(view).toContainText("1 watched users suspended or deleted");
+        await page.getByRole("button", { name: "Status" }).click();
+        await expect(view).toBeHidden();
+        expect(harness.warnings()).toEqual([]);
+    });
+
+    test("an older bdfr serve without a job list", async () => {
+        harness.serve("GET", "/status", { json: { version: "3.0.0", running: null, queued: 0 } });
+        harness.serve("GET", "/jobs", { status: 404, json: { error: "Not found" } });
+        const page = await harness.open();
+        await page.getByRole("button", { name: "Status" }).click();
+        await expect(serverView(page)).toContainText("bdfr serve 3.0.0 · idle · 0 queued");
+        await expect(serverView(page)).toContainText("doesn't list its jobs");
+        expect(harness.warnings()).toContainEqual(expect.stringMatching(/GET \/jobs.*404/));
+    });
+
+    test("bdfr serve down", async () => {
+        harness.serve("GET", "/status", { network: "error" });
+        const page = await harness.open();
+        await page.getByRole("button", { name: "Status" }).click();
+        await expect(serverView(page)).toHaveText("bdfr serve isn't running");
+        expect(harness.warnings()).toContainEqual(expect.stringMatching(/GET \/status.*couldn't be reached/));
+    });
+});

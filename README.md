@@ -59,6 +59,8 @@ Marks next to post titles: green ✔ downloaded now, grey ✔ already downloaded
 
 Posts that fail (a host down or rate-limiting, a gallery stopped part way) are kept in `failed_posts.json` in the configuration directory and tried again by the server after 1 hour, then 6 hours, 1, 3 and 7 days, as jobs that wait behind the userscript's and never ask Arctic Shift for anything. A post is dropped from the list once any job downloads it (or finds it already downloaded or filtered out); after the last retry fails it stays listed as given up. `GET /status` counts them (`retries`: `waiting`, `given_up`).
 
+**Status** in the panel shows what the server is doing, refreshed every 5 seconds while open: whether a job is running, how many are queued, the failed posts waiting for a retry, the recent jobs (`GET /jobs`: the queued and running ones and the last 50 finished, with their counts and errors) and watched users whose last archive check failed or who are suspended or deleted.
+
 The panel only appears on user pages. To use it on subreddit pages too (downloading into a folder named after the subreddit), set `subredditPages: true` in `SETTINGS` at the top of the script.
 
 On every old.reddit page, links to a user's profile go to their submitted posts, newest first (`old.reddit.com/user/<name>/submitted/?sort=new`), however you open them (click, middle-click, "Open in new tab"). Turn this off with `userLinksToSubmitted: false` in `SETTINGS`.

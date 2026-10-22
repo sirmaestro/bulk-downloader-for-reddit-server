@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.10
+// @version      4.11
 // @description  Downloads the posts on old.reddit pages through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @grant        GM_getValue
@@ -1018,6 +1018,8 @@
     buttons.append(collectButton, exportButton, clearButton,
         button("Sync", "Sync every watched user (bdfr serve's watchlist) from Reddit now, as the background sync does "
             + `every ${SETTINGS.syncEveryHours} hours`, syncNow),
+        button("Status", "bdfr serve's recent jobs, queue, failed posts waiting for a retry and watchlist problems",
+            toggleServerView),
         button("⚙", "bdfr serve address and token", configure));
 
     // Ticked: every Download also goes through the user's whole archive (Arctic Shift), finding posts removed from
@@ -1041,8 +1043,75 @@
         return label;
     }
     const status = document.createElement("div");
-    panel.append(buttons, status);
+    // The Status view: what bdfr serve is doing, refreshed while it's open
+    const serverView = document.createElement("div");
+    serverView.className = "bdfr-server-view";
+    serverView.style.cssText = `display:none;border-top:1px solid ${COLOURS.raised};padding-top:3px;`
+        + "max-height:300px;overflow-y:auto;white-space:pre-wrap";
+    panel.append(buttons, status, serverView);
     document.body.appendChild(panel);
+
+    let serverViewTimer = null;
+
+    function toggleServerView() {
+        const open = serverView.style.display === "none";
+        serverView.style.display = open ? "" : "none";
+        clearInterval(serverViewTimer);
+        if (!open) return;
+        refreshServerView();
+        serverViewTimer = setInterval(refreshServerView, 5000);
+    }
+
+    async function refreshServerView() {
+        let serverStatus;
+        try {
+            serverStatus = await request("GET", "/status");
+        } catch (error) {
+            serverView.textContent = describeError(error);
+            return;
+        }
+        // Older servers have no job list (404) or watchlist; the rest is still shown
+        const [jobs, watchlist] = await Promise.all([
+            request("GET", "/jobs").catch(() => null),
+            request("GET", "/watchlist").catch(() => null),
+        ]);
+        serverView.textContent = describeServer(serverStatus, jobs, watchlist).join("\n");
+    }
+
+    function describeServer(serverStatus, jobs, watchlist) {
+        const lines = [];
+        let line = `bdfr serve ${serverStatus.version} · ${serverStatus.running ? "running a job" : "idle"}`
+            + ` · ${serverStatus.queued} queued`;
+        const retries = serverStatus.retries;
+        if (retries) line += ` · failed posts: ${retries.waiting} to retry, ${retries.given_up} given up`;
+        lines.push(line);
+        if (!jobs) {
+            lines.push("This bdfr serve doesn't list its jobs; update it to see them");
+        } else {
+            lines.push(jobs.jobs.length ? "Recent jobs:" : "No jobs since bdfr serve started");
+            for (const job of jobs.jobs.slice(0, 15)) lines.push(describeJob(job));
+        }
+        const users = (watchlist && watchlist.users) || [];
+        const problems = users.filter((user) => user.last_error);
+        if (problems.length) {
+            lines.push("Watchlist problems:");
+            for (const user of problems) lines.push(`  u/${user.name}: ${user.last_error}`);
+        }
+        const gone = users.filter((user) => user.gone).length + ((watchlist && watchlist.gone) || []).length;
+        if (gone) lines.push(`${gone} watched users suspended or deleted`);
+        return lines;
+    }
+
+    function describeJob(job) {
+        const time = new Date(job.created * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const what = job.user ? `u/${job.user}` : `${job.total} posts${job.retry ? " (retry)" : ""}`;
+        const c = job.counts;
+        const counts = ["new", "existing", "duplicate", "skipped", "failed"]
+            .filter((label) => c[label])
+            .map((label) => `${c[label]} ${label === "existing" ? "had" : label}`);
+        return `  ${time} ${job.folder}: ${what} · ${job.state}` + (counts.length ? ` · ${counts.join(", ")}` : "")
+            + (job.error ? ` · ${job.error}` : "");
+    }
 
     function setStatus(text) {
         status.textContent = text;

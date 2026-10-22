@@ -89,6 +89,13 @@ class Job:
             self.counts[label] += 1
             self.results[submission_id] = label
 
+    def summary(self) -> dict:
+        """The job without its per-post results, for GET /jobs"""
+        details = self.to_dict()
+        del details["results"]
+        details.update(user=self.user, created=self.created, finished=self.finished)
+        return details
+
     def to_dict(self) -> dict:
         with self._lock:
             return {
@@ -264,6 +271,12 @@ class DownloadServer:
         if self.scheduler is None:
             return {"users": [], "enabled": False}
         return self.scheduler.snapshot()
+
+    def recent_jobs(self) -> dict:
+        """GET /jobs: the queued, running and last MAX_FINISHED_JOBS finished jobs, newest first"""
+        with self._lock:
+            jobs = sorted(self.jobs.values(), key=lambda job: job.created, reverse=True)
+        return {"jobs": [job.summary() for job in jobs]}
 
     def status(self) -> dict:
         return {
@@ -449,6 +462,8 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
                 self._send(200, server.status())
             elif self.path == "/watchlist":
                 self._send(200, server.watchlist())
+            elif self.path == "/jobs":
+                self._send(200, server.recent_jobs())
             elif match := re.fullmatch(r"/jobs/(\w+)", self.path):
                 job = server.jobs.get(match.group(1))
                 self._send(200, job.to_dict()) if job else self._send(404, {"error": "No such job"})

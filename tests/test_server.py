@@ -416,3 +416,18 @@ def test_retry_jobs_never_look_posts_up(server):
     assert args.archive_lookups is False
     # The posts were noted when they first came
     download_server.scheduler.note_posts.assert_not_called()
+
+
+def test_recent_jobs(server):
+    _, base = server
+    _, first = call(base, "POST", "/jobs", {"folder": "one", "posts": [{"id": "a"}]})
+    wait_for(base, first["id"])
+    _, second = call(base, "POST", "/jobs", {"folder": "two", "user": "someone"})
+    wait_for(base, second["id"])
+    status, body = call(base, "GET", "/jobs")
+    assert status == 200
+    assert [job["id"] for job in body["jobs"]] == [second["id"], first["id"]]
+    newest = body["jobs"][0]
+    assert newest["folder"] == "two" and newest["user"] == "someone" and newest["state"] == "done"
+    assert newest["finished"] >= newest["created"] and "results" not in newest
+    assert body["jobs"][1]["counts"]["new"] == 1
