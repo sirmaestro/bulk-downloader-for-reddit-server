@@ -19,50 +19,110 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/test.yml
 
+  # Each platform builds on its own kind of runner (arm64 for home servers like a Raspberry Pi), since building arm64
+  # under QEMU on an amd64 runner took 5.5 minutes against 40 s natively. Each pushes its image untagged, by digest;
+  # the manifest job then tags both as one multi-platform image. No layer cache: releases are usually more than the
+  # 7 days apart that GitHub keeps an unused cache, and python:3.15-alpine updates often, so exporting it cost more
+  # time than it saved.
   image:
     needs: test
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+        - platform: linux/amd64
+          runner: ubuntu-latest
+        - platform: linux/arm64
+          runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
     - uses: actions/checkout@v7
 
-    - uses: docker/setup-qemu-action@v3
-    - uses: docker/setup-buildx-action@v3
+    - uses: docker/setup-buildx-action@v4
 
     - name: Log in to the GitHub container registry
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Image labels
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: ghcr.io/${{ github.repository }}
+
+    - name: Build and push by digest
+      id: build
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        platforms: ${{ matrix.platform }}
+        labels: ${{ steps.meta.outputs.labels }}
+        outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+
+    - name: Save the digest
+      env:
+        DIGEST: ${{ steps.build.outputs.digest }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/digests"
+        touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+        echo "PLATFORM_PAIR=${{ matrix.platform }}" | tr / - >> "$GITHUB_ENV"
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: digests-${{ env.PLATFORM_PAIR }}
+        path: ${{ runner.temp }}/digests/*
+        if-no-files-found: error
+        retention-days: 1
+
+  manifest:
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        path: ${{ runner.temp }}/digests
+        pattern: digests-*
+        merge-multiple: true
+
+    - uses: docker/setup-buildx-action@v4
+
+    - name: Log in to the GitHub container registry
+      uses: docker/login-action@v4
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
     # :X.Y.Z and :X.Y, plus :latest (added for semver tags without a pre-release part)
-    - name: Image tags and labels
+    - name: Image tags
       id: meta
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@v6
       with:
         images: ghcr.io/${{ github.repository }}
         tags: |
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
 
-    # arm64 for home servers like a Raspberry Pi
-    - name: Build and push
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+    - name: Tag both platforms' images as one
+      working-directory: ${{ runner.temp }}/digests
+      env:
+        IMAGE: ghcr.io/${{ github.repository }}
+      run: |
+        docker buildx imagetools create \
+          $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+          $(printf "${IMAGE,,}@sha256:%s " *)
+        docker buildx imagetools inspect "${IMAGE,,}:${{ steps.meta.outputs.version }}"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: image
+    needs: manifest
     runs-on: ubuntu-latest
     permissions:
       contents: write
