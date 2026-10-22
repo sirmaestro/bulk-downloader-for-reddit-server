@@ -9,7 +9,6 @@ from bdfr.exceptions import NotADownloadableLinkError
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 from bdfr.site_downloaders.direct import Direct
 from bdfr.site_downloaders.download_factory import DownloadFactory
-from bdfr.site_downloaders.erome import Erome
 from bdfr.site_downloaders.fallback_downloaders.ytdlp_fallback import YtdlpFallback
 from bdfr.site_downloaders.gallery import Gallery
 from bdfr.site_downloaders.gfycat import Gfycat
@@ -38,7 +37,6 @@ from bdfr.site_downloaders.youtube import Youtube
         ("https://m.imgur.com/a/py3RW0j", Imgur),
         ("https://www.reddit.com/gallery/lu93m7", Gallery),
         ("https://gfycat.com/concretecheerfulfinwhale", Gfycat),
-        ("https://www.erome.com/a/NWGw0F09", Erome),
         ("https://youtube.com/watch?v=Gv8Wz74FjVA", Youtube),
         ("https://redgifs.com/watch/courageousimpeccablecanvasback", Redgifs),
         ("https://www.gifdeliverynetwork.com/repulsivefinishedandalusianhorse", Redgifs),
@@ -52,7 +50,7 @@ from bdfr.site_downloaders.youtube import Youtube
         ("https://vimeo.com/channels/31259/53576664", YtdlpFallback),
         ("http://video.pbs.org/viralplayer/2365173446/", YtdlpFallback),
         ("https://www.pornhub.com/view_video.php?viewkey=ph5a2ee0461a8d0", PornHub),
-        ("https://www.patreon.com/posts/minecart-track-59346560", Gallery),
+        ("https://www.patreon.com/posts/minecart-track-59346560", YtdlpFallback),
     ),
 )
 def test_factory_lever_good(test_submission_url: str, expected_class: BaseDownloader):
@@ -74,6 +72,10 @@ def test_factory_lever_good(test_submission_url: str, expected_class: BaseDownlo
         "https://www.fanvue.com/peonyneko/fv-2",
         "http://strip.com",
         "https://page.kakao.com/content/57854767?utm_source=sh_clip",
+        # Hosts whose downloaders were removed
+        "https://www.erome.com/a/NWGw0F09",
+        "https://www.vidble.com/show/UxsvAssYe5",
+        "https://www.delayforreddit.com/dfr/calvin6123/MjU1Njc5NQ==",
     ),
 )
 def test_factory_lever_bad(test_url: str, monkeypatch: pytest.MonkeyPatch):

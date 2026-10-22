@@ -8,7 +8,6 @@ description = "Keeps folders of Reddit media up to date from the Arctic Shift ar
 requires-python = ">=3.15"
 license-files = ["LICENSE"]
 dependencies = [
-    "beautifulsoup4>=4.15.0",
     "click>=8.5.0",
     "emoji>=2.16.0",
     "platformdirs>=4.13.5",

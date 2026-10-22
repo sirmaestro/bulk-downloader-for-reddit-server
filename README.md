@@ -356,15 +356,12 @@ All keys are optional:
 Downloader modules can be disabled with `--disable-module` or the `disabled_modules` configuration key. This is the only way to stop the yt-dlp fallback, which handles hundreds of sites. The names, case-insensitive, are:
 
 - `Direct`
-- `DelayForReddit`
-- `Erome`
 - `Gallery` (Reddit galleries)
 - `Gfycat`
 - `Imgur`
 - `PornHub`
 - `Redgifs`
 - `SelfPost` (Reddit text posts)
-- `Vidble`
 - `VReddit` (Reddit videos)
 - `Youtube`
 - `YtdlpFallback` (yt-dlp fallback)
@@ -383,9 +380,7 @@ BDFR follows the naming rules of the system it runs on. When saving to a drive w
 
 ## List of currently supported sources
 
-- Direct links to files
-- Delay for Reddit
-- Erome
+- Direct links to files (including Vidble's)
 - Gfycat (old links are fetched from Redgifs, where Gfycat's surviving clips moved)
 - Imgur
 - PornHub
@@ -393,7 +388,6 @@ BDFR follows the naming rules of the system it runs on. When saving to a drive w
 - Reddit text posts
 - Reddit videos
 - Redgifs
-- Vidble
 - YouTube
     - Any site supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md), chosen from the link alone; links to other pages (OnlyFans, Fanvue, ...) are skipped without a request, as yt-dlp's generic page reader isn't used
 

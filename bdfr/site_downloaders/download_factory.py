@@ -6,9 +6,7 @@ import urllib.parse
 
 from bdfr.exceptions import NotADownloadableLinkError
 from bdfr.site_downloaders.base_downloader import BaseDownloader
-from bdfr.site_downloaders.delay_for_reddit import DelayForReddit
 from bdfr.site_downloaders.direct import Direct
-from bdfr.site_downloaders.erome import Erome
 from bdfr.site_downloaders.fallback_downloaders.ytdlp_fallback import YtdlpFallback
 from bdfr.site_downloaders.gallery import Gallery
 from bdfr.site_downloaders.gfycat import Gfycat
@@ -16,7 +14,6 @@ from bdfr.site_downloaders.imgur import Imgur
 from bdfr.site_downloaders.pornhub import PornHub
 from bdfr.site_downloaders.redgifs import Redgifs
 from bdfr.site_downloaders.self_post import SelfPost
-from bdfr.site_downloaders.vidble import Vidble
 from bdfr.site_downloaders.vreddit import VReddit
 from bdfr.site_downloaders.youtube import Youtube
 
@@ -35,13 +32,7 @@ class DownloadFactory:
             sanitised_url
         ):
             return Direct
-        elif re.match(r"erome\.com.*", sanitised_url):
-            return Erome
-        elif re.match(r"delayforreddit\.com", sanitised_url):
-            return DelayForReddit
         elif re.match(r"reddit\.com/gallery/.*", sanitised_url):
-            return Gallery
-        elif re.match(r"patreon\.com.*", sanitised_url):
             return Gallery
         elif re.match(r"reddit\.com/r/", sanitised_url):
             return SelfPost
@@ -53,8 +44,6 @@ class DownloadFactory:
             return VReddit
         elif re.match(r"pornhub\.com.*", sanitised_url):
             return PornHub
-        elif re.match(r"vidble\.com", sanitised_url):
-            return Vidble
         elif YtdlpFallback.can_handle_link(url.strip()):
             return YtdlpFallback
         else:
