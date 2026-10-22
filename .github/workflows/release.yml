@@ -3,7 +3,8 @@ name: Release
 # A version tag (git tag v3.0.1 && git push origin v3.0.1) runs the tests, publishes the Docker image as
 # ghcr.io/<owner>/<repo>:3.0.1, :3.0 and :latest, and makes a GitHub release with the userscript attached, so
 # https://github.com/<owner>/<repo>/releases/latest/download/bdfr-export.user.js is always the newest one.
-# Pushes to main only run the tests (test.yml). To redo a release, run this workflow on its tag.
+# Pushes to main only run the tests (test.yml); a release reuses that run's result for the same commit rather than
+# testing it again. To redo a release, run this workflow on its tag.
 on:
   push:
     tags: [ "v*" ]
@@ -14,9 +15,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
+  # A tag pushed with its commit would otherwise test the same commit twice, so this waits for test.yml's run from
+  # the push to main and only runs the tests itself (test) when there is none: a tag on a commit that isn't on main,
+  # a commit changing only .md files, or a run that was cancelled.
+  main-tests:
     # Only tags have a version to publish under (a manual run picks the tag as its ref)
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      passed: ${{ steps.wait.outputs.passed }}
+    steps:
+    # The image tags come from the version (docker/metadata-action's semver patterns), so v4 or v4.1 gives none
+    - name: Check the tag is vX.Y.Z
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::$TAG isn't a version like v4.0.0"
+          exit 1
+        fi
+
+    - id: wait
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        SHA: ${{ github.sha }}
+      run: |
+        # The push to main can start its run a little after the tag's
+        for attempt in 1 2 3 4 5 6; do
+          run=$(gh run list --workflow test.yml --commit "$SHA" --event push --limit 1 --json databaseId,conclusion \
+            --jq '.[0] | select(.conclusion != "cancelled") | .databaseId')
+          [ -n "$run" ] && break
+          sleep 10
+        done
+        if [ -z "$run" ]; then
+          echo "No test run on main for $SHA; testing here"
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        # Fails this job (and so the release) if those tests fail
+        gh run watch "$run" --exit-status --interval 30 > /dev/null
+        echo "Tests passed in run $run"
+        echo "passed=true" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: main-tests
+    if: needs.main-tests.outputs.passed != 'true'
     uses: ./.github/workflows/test.yml
 
   # Each platform builds on its own kind of runner (arm64 for home servers like a Raspberry Pi), since building arm64
@@ -25,7 +71,11 @@ jobs:
   # 7 days apart that GitHub keeps an unused cache, and python:3.15-alpine updates often, so exporting it cost more
   # time than it saved.
   image:
-    needs: test
+    needs: [main-tests, test]
+    # test is skipped when main's run already passed
+    if: >-
+      !cancelled() && needs.main-tests.result == 'success'
+      && (needs.test.result == 'success' || needs.test.result == 'skipped')
     strategy:
       matrix:
         include:

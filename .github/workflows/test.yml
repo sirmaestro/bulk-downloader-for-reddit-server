@@ -9,7 +9,7 @@ on:
     branches: [ main ]
     paths-ignore:
       - "**.md"
-  # Version tags run these from release.yml, before publishing anything
+  # release.yml runs these for a version tag whose commit had no run here, before publishing anything
   workflow_call:
   workflow_dispatch:
 
