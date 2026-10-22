@@ -4,7 +4,6 @@
 import platform
 import sys
 import threading
-import unittest.mock
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
@@ -121,7 +120,7 @@ def test_limit_filename_length(test_filename: str, test_ending: str, test_format
     result = test_formatter.limit_file_name_length(test_filename, test_ending, Path())
     assert len(result.name) <= 255
     assert len(result.name.encode("utf-8")) <= 255
-    assert len(str(result)) <= FileNameFormatter.find_max_path_length()
+    assert len(str(result)) <= test_formatter.max_path
     assert isinstance(result, Path)
 
 
@@ -146,7 +145,7 @@ def test_preserve_id_append_when_shortening(
     assert len(result.name) <= 255
     assert len(result.name.encode("utf-8")) <= 255
     assert result.name.endswith(expected_end)
-    assert len(str(result)) <= FileNameFormatter.find_max_path_length()
+    assert len(str(result)) <= test_formatter.max_path
 
 
 @pytest.mark.parametrize(("index", "expected_end"), ((None, "_abc1234.png"), (2, "_abc1234_2.png")))
@@ -202,7 +201,7 @@ def test_shorten_path(test_name: str, test_ending: str, tmp_path: Path, test_for
     assert len(str(result.name)) <= 255
     assert len(str(result.name).encode("UTF-8")) <= 255
     assert len(str(result.name).encode("cp1252")) <= 255
-    assert len(str(result)) <= FileNameFormatter.find_max_path_length()
+    assert len(str(result)) <= test_formatter.max_path
 
 
 @pytest.mark.parametrize(
@@ -319,19 +318,12 @@ def test_time_string_formats(test_time_format: str, expected: str):
     assert result == expected
 
 
-def test_get_max_path_length():
-    result = FileNameFormatter.find_max_path_length()
-    assert result in (4096, 260, 1024)
-
-
 def test_windows_max_path(tmp_path: Path):
-    with unittest.mock.patch("platform.system", return_value="Windows"):
-        with unittest.mock.patch("bdfr.file_name_formatter.FileNameFormatter.find_max_path_length", return_value=260):
-            mock = MagicMock()
-            mock.max_path = 260
-            result = FileNameFormatter.limit_file_name_length(mock, "test" * 100, "_1.png", tmp_path)
-            assert len(str(result)) <= 260
-            assert len(result.name) <= (260 - len(str(tmp_path)))
+    mock = MagicMock()
+    mock.max_path = 260
+    result = FileNameFormatter.limit_file_name_length(mock, "test" * 100, "_1.png", tmp_path)
+    assert len(str(result)) <= 260
+    assert len(result.name) <= (260 - len(str(tmp_path)))
 
 
 def test_shortening_stops_when_no_name_fits(tmp_path: Path, test_formatter: FileNameFormatter):

@@ -5,7 +5,6 @@ import datetime
 import logging
 import platform
 import re
-import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -46,10 +45,10 @@ class FileNameFormatter:
         self.directory_format_string: list[str] = directory_format_string.split("/")
         self.time_format_string = time_format_string
         self.restiction_scheme = restriction_scheme.lower().strip() if restriction_scheme else None
-        if self.restiction_scheme == "windows":
+        if self.restiction_scheme == "windows" or platform.system() == "Windows":
             self.max_path = self.WINDOWS_MAX_PATH_LENGTH
         else:
-            self.max_path = self.find_max_path_length()
+            self.max_path = self.LINUX_MAX_PATH_LENGTH
         self.filename_character_set = filename_character_set
 
     def _format_name(self, submission: Post, format_string: str) -> str:
@@ -159,16 +158,6 @@ class FileNameFormatter:
             out = Path(root, filename + ending)
 
         return out
-
-    @staticmethod
-    def find_max_path_length() -> int:
-        try:
-            return int(subprocess.check_output(["getconf", "PATH_MAX", "/"]))
-        except ValueError, subprocess.CalledProcessError, OSError:
-            if platform.system() == "Windows":
-                return FileNameFormatter.WINDOWS_MAX_PATH_LENGTH
-            else:
-                return FileNameFormatter.LINUX_MAX_PATH_LENGTH
 
     def format_resource_paths(
         self,
