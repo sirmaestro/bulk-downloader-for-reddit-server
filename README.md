@@ -403,4 +403,4 @@ BDFR follows the naming rules of the system it runs on. When saving to a drive w
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how a download flows through the code, and [AGENTS.md](AGENTS.md) for the layout, how to run the tests, and the invariants that keep existing folders from being downloaded again.
 
-Pushes to `main` and pull requests run the tests. To make a release, push a version tag (`git tag v3.0.1 && git push origin v3.0.1`): [release.yml](.github/workflows/release.yml) runs the tests, publishes the image as `3.0.1`, `3.0` and `latest`, and creates a GitHub release with the userscript attached. Raise the userscript's `@version` when it changes, or Tampermonkey won't offer the update.
+GitHub doesn't run the tests: run them locally before releasing. To make a release, push a version tag with all three numbers (`git tag v3.0.1 && git push origin v3.0.1`): [release.yml](.github/workflows/release.yml) publishes the image as `3.0.1`, `3.0` and `latest`, and creates a GitHub release with the userscript attached. Raise the userscript's `@version` when it changes, or Tampermonkey won't offer the update.

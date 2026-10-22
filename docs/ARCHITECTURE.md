@@ -41,5 +41,5 @@ The hash store keeps content hash → file, file → hash and media URL → hash
 
 1. Write a class in `bdfr/site_downloaders/` that inherits from `BaseDownloader`, or from a close relative. `VReddit`, for example, reuses `Youtube`'s yt-dlp handling. It is constructed as `Cls(post, args)`, and `find_resources()` returns the post's `Resource`s.
 2. Keep it thread-safe: with `--parallel`, `find_resources()` and `Resource.download()` run in threads, so shared state (such as `Redgifs`'s token) goes behind a lock.
-3. Add its URL pattern to `DownloadFactory.pull_lever()`, and add tests for both the downloader and the factory. Tests that reach the site are marked `online`, and CI doesn't run them. Mock the HTTP calls for anything that must stay tested.
+3. Add its URL pattern to `DownloadFactory.pull_lever()`, and add tests for both the downloader and the factory. Tests must not reach the site: mock the HTTP calls (or use recorded API data).
 4. Keep `Resource.url` stable once a site is supported, because existing downloads are recognised by their stored media URL.

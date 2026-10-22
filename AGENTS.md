@@ -7,13 +7,14 @@ A personal fork of BDFR (Bulk Downloader for Reddit) for keeping folders of Redd
 ```bash
 python -m pip install -e ".[dev,similar]" && pre-commit install     # once; then use `python -m bdfr ...` or `bdfr ...`
 python -m pytest tests -q
-python -m isort bdfr tests && python -m black bdfr tests     # format; CI fails on unformatted code
+python -m isort bdfr tests && python -m black bdfr tests     # format
 python -m flake8 bdfr tests                                  # lint
 ```
 
 - The pre-commit hook runs black, isort and flake8 on staged files. If it reformats something the commit stops: `git add` the files and commit again. On Windows, set `PYTHONUTF8=1`, or isort skips files containing non-ASCII characters with a "charmap" warning.
 
-- Every test is offline (~7 s; CI runs them all), and `--strict-markers` rejects the old `online`/`slow` markers. Don't add tests that need the network: site downloaders are tested with recorded API data and mocked requests.
+- There is no CI testing: run the tests, lint and the userscript tests locally before committing or tagging a release.
+- Every test is offline (~7 s), and `--strict-markers` rejects the old `online`/`slow` markers. Don't add tests that need the network: site downloaders are tested with recorded API data and mocked requests.
 - Never run `bdfr/__main__.py` as a script: it imports a PyPI `bdfr` if one is installed.
 - Manual runs: pass `--config <copy of bdfr/default_config.cfg>`, download into a scratch directory, use small `-L`, and follow the Arctic Shift rules below.
 
@@ -50,7 +51,7 @@ Rules:
 - `bdfr/retries.py`: `RetryList`, started by `serve`: posts a job reports `failed` (`Downloader.failed_posts`: ID -> (post data, reason)) are kept per folder in `failed_posts.json` in the configuration directory (`note_job`, from `_run_job`), and queued again after 1 h, 6 h, 1, 3 and 7 days as posts-only jobs with `scheduled=True, retry=True`, which run with `args.archive_lookups` off (no Arctic Shift requests); then given up (`next_try` null, still listed). Any other result for the post in that folder drops it. `GET /status` has the counts.
 - `scripts/`: `tampermonkey/bdfr-export.user.js` (old.reddit panel on user pages, configurable in `SETTINGS`: Download (plus the user's Arctic Shift listing when the page is empty or its oldest post isn't downloaded, or always and all of it with the Archive checkbox) via `bdfr serve`, Collect + Export for `--post-json`). Test it with `npm install && npx playwright install chromium && npm test` in `scripts/tampermonkey` (`node --check` plus Playwright: `tests/harness.js` fakes the `GM_*` API and answers its requests from fixtures and routes in each test, including failures). Every failed request must be logged to the console as a warning starting `BDFR:`, not only shown in the panel. Its background sync (`backgroundSync()`, before the panel code, on every old.reddit page) reads `GET /watchlist`, then each due user's `submitted.json` until 5 known posts in a row, and sends posts-only jobs (never `user`, so no Arctic Shift requests); a GM-stored lock keeps it to one tab; the panel's Sync button and Tampermonkey's menu run it at once for every user (`syncNow()`; pressed again it stops after the current user, and an unfinished run, kept in `bdfr-sync-run`, is carried on by the next one). Reddit reads (`readReddit()`) follow `x-ratelimit-remaining`/`-reset` and retry a 429 after the reset; waits use a worker's timer (`sleep()`) so background tabs don't slow them. A 403/404 is checked against `about.json` (`accountGone()`): suspended or deleted accounts are reported to the server (`reportGone()`; retried weekly with an older server), hibernating users (by the watchlist's `hibernate_days`) are synced weekly, and aliases (`alias_of`) never (`syncDue()`).
 - `tests/`: pytest; `test_arctic_shift.py` (mocked HTTP session) and `test_server.py` (fake downloader) cover the fork's additions. `mock_arctic_shift.py` is a local fake of the Arctic Shift API and the media its posts link to, with queued failures; `test_serve_arctic_shift.py` runs serve jobs with the real downloader against it. Never test against the live API.
-- `.github/workflows/`: `test.yml` (lint, offline tests, userscript tests; on pushes to `main` and pull requests, and called by `release.yml`). `release.yml`, only for `v*` tags: the tests, then the Docker image to `ghcr.io/sirmaestro/bulk-downloader-for-reddit-server` as `X.Y.Z`, `X.Y` and `latest` (amd64 and arm64, each built natively on its own runner and pushed by digest, then tagged together by the `manifest` job), and a GitHub release with `bdfr-export.user.js` attached, which the userscript's `@updateURL` points at (raise `@version` when it changes).
+- `.github/workflows/`: only `release.yml`, for `v*` tags (`vX.Y.Z`, checked by the `version` job; no tests run): the Docker image to `ghcr.io/sirmaestro/bulk-downloader-for-reddit-server` as `X.Y.Z`, `X.Y` and `latest` (amd64 and arm64, each built natively on its own runner and pushed by digest, then tagged together by the `manifest` job), and a GitHub release with `bdfr-export.user.js` attached, which the userscript's `@updateURL` points at (raise `@version` when it changes).
 
 ## Invariants (breaking these re-downloads or loses users' data)
 
@@ -70,7 +71,7 @@ Rules:
 - `--parallel`: `Downloader.download()` submits `_run_one` to a thread pool and reports results in listing order. Everything touching the hash store or the download folder runs under `Downloader._store_lock` (`_check_before_download`, and the hash checks and store updates after `res.download()`), except writing the file itself: its hash is in `_writing` meanwhile, and a download with the same hash waits on `_written` until it's stored, so it's still a duplicate; the SQLite connection is opened with `check_same_thread=False` for this. Per-submission outcome state is thread-local (`_files`, `_skip_reason`, ... are properties). A resource URL is claimed with `_claim` before downloading and released with `_release`; others wanting the same URL wait, so a link is downloaded once per run (`_run_urls` covers runs without a hash store).
 - Never write to a configuration file (`--config`, `config.cfg`, `default_config.cfg`); the packaged `bdfr/default_config.cfg` is only copied to the configuration directory when none exists.
 - The configuration directory comes from `platformdirs` (`bdfr`, `BDFR`), the same path `appdirs` gave before 3.0; it holds users' `serve_token.txt`, `watchlist.yaml`, `watchlist_state.json` and `failed_posts.json`, so don't change it.
-- Python 3.15+ (CI and Docker use 3.15).
+- Python 3.15+ (Docker uses 3.15).
 
 ## Style
 
