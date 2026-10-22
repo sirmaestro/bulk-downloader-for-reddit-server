@@ -20,7 +20,6 @@ from bdfr.site_downloaders.vreddit import VReddit
 from bdfr.site_downloaders.youtube import Youtube
 
 
-@pytest.mark.online
 @pytest.mark.parametrize(
     ("test_submission_url", "expected_class"),
     (

@@ -4,49 +4,11 @@
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import SiteDownloaderError
 from bdfr.site_downloaders.gallery import Gallery
-
-
-@pytest.mark.online
-@pytest.mark.parametrize(
-    ("test_ids", "expected"),
-    (
-        (
-            [
-                {"media_id": "18nzv9ch0hn61"},
-                {"media_id": "jqkizcch0hn61"},
-                {"media_id": "k0fnqzbh0hn61"},
-                {"media_id": "m3gamzbh0hn61"},
-            ],
-            {
-                "https://i.redd.it/18nzv9ch0hn61.jpg",
-                "https://i.redd.it/jqkizcch0hn61.jpg",
-                "https://i.redd.it/k0fnqzbh0hn61.jpg",
-                "https://i.redd.it/m3gamzbh0hn61.jpg",
-            },
-        ),
-        (
-            [
-                {"media_id": "04vxj25uqih61"},
-                {"media_id": "0fnx83kpqih61"},
-                {"media_id": "7zkmr1wqqih61"},
-                {"media_id": "u37k5gxrqih61"},
-            ],
-            {
-                "https://i.redd.it/04vxj25uqih61.png",
-                "https://i.redd.it/0fnx83kpqih61.png",
-                "https://i.redd.it/7zkmr1wqqih61.png",
-                "https://i.redd.it/u37k5gxrqih61.png",
-            },
-        ),
-    ),
-)
-def test_gallery_get_links(test_ids: list[dict], expected: set[str]):
-    results = Gallery._get_links(test_ids)
-    assert set(results) == expected
 
 
 @pytest.mark.parametrize(
@@ -61,3 +23,25 @@ def test_gallery_without_data_says_why(removed, message):
     post.removed_by_category = removed
     with pytest.raises(SiteDownloaderError, match=message):
         Gallery(post, Configuration()).find_resources()
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected", "tried"),
+    (
+        ({".jpg": 200}, "https://i.redd.it/abc.jpg", [".jpg"]),
+        # .jpg is always tried first, then the others in a fixed order (stored URLs depend on it)
+        ({".png": 200}, "https://i.redd.it/abc.png", [".jpg", ".png"]),
+        ({".jpeg": 200, ".gif": 200}, "https://i.redd.it/abc.gif", [".jpg", ".png", ".gif"]),
+        ({}, None, [".jpg", ".png", ".gif", ".gifv", ".jpeg"]),
+    ),
+)
+def test_find_image_tries_jpg_first(answers: dict, expected, tried: list[str], monkeypatch: pytest.MonkeyPatch):
+    asked = []
+
+    def head(url, **kwargs):
+        asked.append(url)
+        return MagicMock(status_code=answers.get(url[url.rindex(".") :], 404))
+
+    monkeypatch.setattr(requests, "head", head)
+    assert Gallery.find_image("abc") == expected
+    assert asked == [f"https://i.redd.it/abc{extension}" for extension in tried]

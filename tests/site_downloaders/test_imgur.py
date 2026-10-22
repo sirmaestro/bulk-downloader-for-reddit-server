@@ -2,68 +2,15 @@
 # -*- coding: utf-8 -*-
 
 import json
-from unittest.mock import Mock
+import urllib.request
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import requests
 
 from bdfr.configuration import Configuration
-from bdfr.resource import Resource
+from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
 from bdfr.site_downloaders.imgur import Imgur
-
-
-@pytest.mark.online
-@pytest.mark.parametrize(
-    ("test_url", "expected_hashes"),
-    (
-        ("https://imgur.com/a/xWZsDDP", ("f551d6e6b0fef2ce909767338612e31b",)),
-        ("https://imgur.com/gallery/IjJJdlC", ("740b006cf9ec9d6f734b6e8f5130bdab",)),
-        ("https://imgur.com/gallery/IjJJdlC/", ("740b006cf9ec9d6f734b6e8f5130bdab",)),
-        (
-            "https://imgur.com/a/dcc84Gt",
-            (
-                "cf1158e1de5c3c8993461383b96610cf",
-                "28d6b791a2daef8aa363bf5a3198535d",
-                "248ef8f2a6d03eeb2a80d0123dbaf9b6",
-                "029c475ce01b58fdf1269d8771d33913",
-            ),
-        ),
-        (
-            "https://imgur.com/a/eemHCCK",
-            (
-                "9cb757fd8f055e7ef7aa88addc9d9fa5",
-                "b6cb6c918e2544e96fb7c07d828774b5",
-                "fb6c913d721c0bbb96aa65d7f560d385",
-            ),
-        ),
-        ("https://o.imgur.com/jZw9gq2.jpg", ("6d6ea9aa1d98827a05425338afe675bc",)),
-        ("https://i.imgur.com/lFJai6i.gifv", ("01a6e79a30bec0e644e5da12365d5071",)),
-        ("https://i.imgur.com/ywSyILa.gifv?", ("56d4afc32d2966017c38d98568709b45",)),
-        ("https://imgur.com/ubYwpbk.GIFV", ("d4a774aac1667783f9ed3a1bd02fac0c",)),
-        ("https://i.imgur.com/j1CNCZY.gifv", ("ed63d7062bc32edaeea8b53f876a307c",)),
-        ("https://i.imgur.com/uTvtQsw.gifv", ("46c86533aa60fc0e09f2a758513e3ac2",)),
-        ("https://i.imgur.com/OGeVuAe.giff", ("77389679084d381336f168538793f218",)),
-        ("https://i.imgur.com/OGeVuAe.gift", ("77389679084d381336f168538793f218",)),
-        ("https://i.imgur.com/3SKrQfK.jpg?1", ("aa299e181b268578979cad176d1bd1d0",)),
-        ("https://i.imgur.com/cbivYRW.jpg?3", ("7ec6ceef5380cb163a1d498c359c51fd",)),
-        ("http://i.imgur.com/s9uXxlq.jpg?5.jpg", ("338de3c23ee21af056b3a7c154e2478f",)),
-        ("http://i.imgur.com/s9uXxlqb.jpg", ("338de3c23ee21af056b3a7c154e2478f",)),
-        ("https://i.imgur.com/2TtN68l_d.webp", ("6569ab9ad9fa68d93f6b408f112dd741",)),
-        ("https://imgur.com/a/1qzfWtY/gifv", ("65fbc7ba5c3ed0e3af47c4feef4d3735",)),
-        ("https://imgur.com/a/1qzfWtY/mp4", ("65fbc7ba5c3ed0e3af47c4feef4d3735",)),
-        ("https://imgur.com/a/1qzfWtY/spqr", ("65fbc7ba5c3ed0e3af47c4feef4d3735",)),
-        ("https://i.imgur.com/expO7Rc.gifv", ("e309f98158fc98072eb2ae68f947f421",)),
-    ),
-)
-def test_find_resources(test_url: str, expected_hashes: list[str]):
-    mock_download = Mock()
-    mock_download.url = test_url
-    downloader = Imgur(mock_download, Configuration())
-    results = downloader.find_resources()
-    assert all([isinstance(res, Resource) for res in results])
-    [res.download() for res in results]
-    hashes = set([res.hash.hexdigest() for res in results])
-    assert hashes == set(expected_hashes)
 
 
 @pytest.mark.parametrize(
@@ -90,3 +37,93 @@ def test_requests_send_user_agent(test_url: str, api_data: dict, monkeypatch: py
     for res in Imgur(mock_submission, config).find_resources():
         res.download()
     assert get.call_args.kwargs["headers"]["User-Agent"].startswith("bdfr/")
+
+
+@pytest.mark.parametrize(
+    ("test_url", "api_url"),
+    (
+        ("https://imgur.com/a/xWZsDDP", "https://api.imgur.com/3/album/xWZsDDP"),
+        ("https://imgur.com/gallery/IjJJdlC", "https://api.imgur.com/3/album/IjJJdlC"),
+        ("https://imgur.com/gallery/IjJJdlC/", "https://api.imgur.com/3/album/IjJJdlC"),
+        ("https://imgur.com/a/1qzfWtY/gifv", "https://api.imgur.com/3/album/1qzfWtY"),
+        ("https://i.imgur.com/lFJai6i.gifv", "https://api.imgur.com/3/image/lFJai6i"),
+        ("https://imgur.com/ubYwpbk.GIFV", "https://api.imgur.com/3/image/ubYwpbk"),
+        ("https://i.imgur.com/2TtN68l_d.webp", "https://api.imgur.com/3/image/2TtN68l"),
+        ("https://i.imgur.com/cbivYRW.jpg?3", "https://api.imgur.com/3/image/cbivYRW"),
+    ),
+)
+def test_links_are_looked_up_by_id(test_url: str, api_url: str, monkeypatch: pytest.MonkeyPatch):
+    asked = []
+
+    def retrieve_url(url, cookies=None, headers=None):
+        asked.append(url)
+        return Mock(text=json.dumps({"data": {"link": "https://i.imgur.com/x.jpg"}}))
+
+    monkeypatch.setattr(Imgur, "retrieve_url", staticmethod(retrieve_url))
+    Imgur(Mock(url=test_url), Configuration()).find_resources()
+    assert asked == [api_url]
+
+
+@pytest.mark.parametrize(
+    ("test_url", "expected"),
+    (
+        ("https://i.imgur.com/3SKrQfK.jpg?1", "https://i.imgur.com/3SKrQfK.jpg?1"),
+        ("http://i.imgur.com/s9uXxlq.jpg", "https://i.imgur.com/s9uXxlq.jpg"),
+    ),
+)
+def test_direct_image_links_need_no_lookup(test_url: str, expected: str, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(Imgur, "retrieve_url", staticmethod(Mock(side_effect=AssertionError("looked up"))))
+    assert [res.url for res in Imgur(Mock(url=test_url), Configuration()).find_resources()] == [expected]
+
+
+@pytest.mark.parametrize(
+    ("originals", "expected"),
+    (
+        (False, ["https://i.imgur.com/a.mp4", "https://i.imgur.com/b.png"]),
+        (True, ["https://i.imgur.com/a.gif", "https://i.imgur.com/b.png"]),
+    ),
+)
+def test_album_takes_mp4_unless_originals(originals: bool, expected: list[str], monkeypatch: pytest.MonkeyPatch):
+    album = {
+        "is_album": True,
+        "images": [
+            {"link": "https://i.imgur.com/a.gif", "mp4": "https://i.imgur.com/a.mp4"},
+            {"link": "https://i.imgur.com/b.png"},
+        ],
+    }
+    monkeypatch.setattr(
+        Imgur, "retrieve_url", staticmethod(lambda url, headers=None: Mock(text=json.dumps({"data": album})))
+    )
+    config = Configuration()
+    config.imgur_originals = originals
+    assert [res.url for res in Imgur(Mock(url="https://imgur.com/a/xWZsDDP"), config).find_resources()] == expected
+
+
+@pytest.mark.parametrize(
+    ("test_url", "originals", "magic", "expected"),
+    (
+        ("https://i.imgur.com/lFJai6i.gifv", False, b"GIF", "https://i.imgur.com/lFJai6i.mp4"),
+        ("https://i.imgur.com/lFJai6i.gifv", True, b"GIF", "https://i.imgur.com/lFJai6i.gif"),
+        # The .gif is really a JPEG: the mp4 is used even with --imgur-originals
+        ("https://i.imgur.com/lFJai6i.gifv", True, b"\xff\xd8\xff", "https://i.imgur.com/lFJai6i.mp4"),
+        ("https://i.imgur.com/lFJai6i.gif", True, None, "https://i.imgur.com/lFJai6i.gif"),
+    ),
+)
+def test_fix404_downloads_gifs_the_api_lost(
+    test_url: str, originals: bool, magic, expected: str, monkeypatch: pytest.MonkeyPatch
+):
+    def not_found(url, cookies=None, headers=None):
+        raise ResourceNotFound(f"Server responded with 404 to {url}")
+
+    urlopen = MagicMock()
+    urlopen.return_value.__enter__.return_value.read.return_value = magic
+    monkeypatch.setattr(Imgur, "retrieve_url", staticmethod(not_found))
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    config = Configuration()
+    config.imgur_fix404 = True
+    config.imgur_originals = originals
+    assert [res.url for res in Imgur(Mock(url=test_url), config).find_resources()] == [expected]
+    # Without --imgur-fix404 the post fails
+    config.imgur_fix404 = False
+    with pytest.raises(SiteDownloaderError, match="404"):
+        Imgur(Mock(url=test_url), config).find_resources()

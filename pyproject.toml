@@ -62,7 +62,3 @@ indent = 4
 minversion = "9.0"
 addopts = "--strict-markers"
 testpaths = "tests"
-markers = [
-    "online: tests require a connection to the internet (third-party media hosts)",
-    "slow: test is slow to run",
-]

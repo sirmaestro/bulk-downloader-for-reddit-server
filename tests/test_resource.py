@@ -35,17 +35,6 @@ def test_resource_get_extension(test_url: str, expected: str):
     assert result == expected
 
 
-@pytest.mark.online
-@pytest.mark.parametrize(
-    ("test_url", "expected_hash"),
-    (("https://www.iana.org/static/_img/2022/iana-logo-homepage.svg", "3914c6f1ab9dda5363d0225934ff90da"),),
-)
-def test_download_online_resource(test_url: str, expected_hash: str):
-    test_resource = Resource(MagicMock(), test_url, Resource.retry_download(test_url))
-    test_resource.download()
-    assert test_resource.hash.hexdigest() == expected_hash
-
-
 def fake_response(url: str, status: int = 200, content: bytes = b"data", redirected: bool = False) -> MagicMock:
     response = MagicMock()
     response.url = url

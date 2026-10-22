@@ -38,10 +38,10 @@ jobs:
         black --check bdfr tests
         isort --check-only bdfr tests
 
-    # Online tests depend on third-party media hosts, so only offline tests run
+    # Every test is offline (media hosts and Arctic Shift are mocked)
     - name: Test with pytest
       run: |
-        pytest -m "not online and not slow"
+        pytest
 
   userscript:
     runs-on: ubuntu-latest

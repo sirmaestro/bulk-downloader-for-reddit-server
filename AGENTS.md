@@ -6,14 +6,14 @@ A personal fork of BDFR (Bulk Downloader for Reddit) for keeping folders of Redd
 
 ```bash
 python -m pip install -e ".[dev]" && pre-commit install     # once; then use `python -m bdfr ...` or `bdfr ...`
-python -m pytest tests -q -m "not online and not slow"
+python -m pytest tests -q
 python -m isort bdfr tests && python -m black bdfr tests     # format; CI fails on unformatted code
 python -m flake8 bdfr tests                                  # lint
 ```
 
 - The pre-commit hook runs black, isort and flake8 on staged files. If it reformats something the commit stops: `git add` the files and commit again. On Windows, set `PYTHONUTF8=1`, or isort skips files containing non-ASCII characters with a "charmap" warning.
 
-- Only offline tests are expected to pass (this is what CI runs). Online tests hit third-party media hosts; don't run them in bulk.
+- Every test is offline (~7 s; CI runs them all), and `--strict-markers` rejects the old `online`/`slow` markers. Don't add tests that need the network: site downloaders are tested with recorded API data and mocked requests.
 - Never run `bdfr/__main__.py` as a script: it imports a PyPI `bdfr` if one is installed.
 - Manual runs: pass `--config <copy of bdfr/default_config.cfg>`, download into a scratch directory, use small `-L`, and follow the Arctic Shift rules below.
 
@@ -24,7 +24,7 @@ Arctic Shift is a free, shared service run by one person, with no uptime guarant
 - A 2-second-spaced trial script got the same 422 on 20 of 130 `posts/search?author=...&limit=1` calls, and on every `posts/search/aggregate` call (`aggregate=subreddit` or `author`), even when retried 20 s later. `users/search?author=<name>` also answers 422. Don't rely on aggregate or user endpoints.
 
 Rules:
-- Tests never contact the live API, online tests included: use `tests/mock_arctic_shift.py` or a mocked session. `tests/conftest.py` makes any test that tries fail.
+- Tests never contact the live API: use `tests/mock_arctic_shift.py` or a mocked session. `tests/conftest.py` makes any test that tries fail.
 - Don't run `bdfr serve`, `bdfr download --user`, curl or ad-hoc scripts against the live API to test or explore. If live data is truly needed, ask the user first, say how many requests it takes, and keep it under about 50 requests at least 3 s apart. Reuse data already fetched rather than asking again. `scripts/arctic_shift_guard.py` (a PreToolUse hook) asks before such commands.
 - On a 422 or 429, back off (`X-RateLimit-Reset`) and don't retry in a tight loop.
 - Product code must keep request counts down too: the scheduler doesn't read hibernating users or aliases, and the userscript's background sync never asks for archive listings.
