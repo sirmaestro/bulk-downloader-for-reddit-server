@@ -121,7 +121,9 @@ class RetryList:
         entry["attempts"] = entry.get("attempts", 0) + 1
         if entry["attempts"] > len(self.BACKOFF_HOURS):
             if entry.get("next_try") is not None:
-                logger.warning(f"Giving up on post {name} in {entry['folder']} after {entry['attempts']} failures")
+                message = f"Giving up on post {name} in {entry['folder']} after {entry['attempts']} failures"
+                logger.warning(message)
+                self.server.notify(f"{message}: {entry.get('error')}")
             entry["next_try"] = None
         else:
             entry["next_try"] = now + self.BACKOFF_HOURS[entry["attempts"] - 1] * HOUR

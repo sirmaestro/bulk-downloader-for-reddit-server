@@ -12,7 +12,7 @@ import time
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -514,8 +514,10 @@ def test_gone_users_are_left_out_and_not_checked_until_recheck(serve, tmp_path, 
     caplog.set_level(logging.INFO)
     write_watchlist(tmp_path / "watchlist.yaml", "gone_recheck_days: 30\nusers: [someone, other]\n")
     serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock)
+    serve.notifier = MagicMock()
     scheduler.note_gone("Someone", "deleted")
     assert "u/someone is deleted on Reddit; not synced or checked for 30 days" in caplog.text
+    serve.notifier.notify.assert_called_once_with("u/someone is deleted on Reddit")
     snapshot = scheduler.snapshot()
     assert [user["name"] for user in snapshot["users"]] == ["other"]
     assert snapshot["gone"] == [{"name": "someone", "gone": "deleted", "recheck": clock.now + 30 * DAY}]
@@ -526,7 +528,8 @@ def test_gone_users_are_left_out_and_not_checked_until_recheck(serve, tmp_path, 
     clock.now += 30 * DAY
     user = next(user for user in scheduler.snapshot()["users"] if user["name"] == "someone")
     assert user["gone"] == "deleted" and user["next_check"] is None
-    scheduler.note_gone("someone", "deleted")  # still gone: left out for another 30 days
+    scheduler.note_gone("someone", "deleted")  # still gone: left out for another 30 days, not notified again
+    serve.notifier.notify.assert_called_once()
     assert [user["name"] for user in scheduler.snapshot()["users"]] == ["other"]
     scheduler.note_gone("someone", None)  # there after all
     assert "gone" not in scheduler.snapshot()["users"][0]

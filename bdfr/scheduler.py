@@ -312,6 +312,7 @@ class BaselineScheduler:
                     else:
                         later = f"not synced or checked for {self.settings['gone_recheck_days']:g} days"
                     logger.info(f"u/{user['name']} is {reason} on Reddit; {later}")
+                    self.server.notify(f"u/{user['name']} is {reason} on Reddit")
                 state.update(gone=reason, gone_checked=self.clock())
             self._save_state()
 

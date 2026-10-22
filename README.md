@@ -61,6 +61,8 @@ Posts that fail (a host down or rate-limiting, a gallery stopped part way) are k
 
 **Status** in the panel shows what the server is doing, refreshed every 5 seconds while open: whether a job is running, how many are queued, the failed posts waiting for a retry, the recent jobs (`GET /jobs`: the queued and running ones and the last 50 finished, with their counts and errors) and watched users whose last archive check failed or who are suspended or deleted.
 
+To be told about problems without looking, give serve `--notify URL` (or set `BDFR_NOTIFY`, e.g. in docker-compose.yml's `environment`), such as an [ntfy](https://ntfy.sh) topic: `--notify https://ntfy.sh/<a topic name only you know>`. It POSTs a plain-text message (with a `Title` header) when a job fails, when a watched user is found suspended or deleted, and when a failed post is given up on. Problems within a minute of each other come as one message, and at most one is sent every 15 minutes, so an Arctic Shift outage doesn't send one per user. Anyone who knows an ntfy.sh topic's name can read it, so pick one that can't be guessed, or use your own ntfy server.
+
 The panel only appears on user pages. To use it on subreddit pages too (downloading into a folder named after the subreddit), set `subredditPages: true` in `SETTINGS` at the top of the script.
 
 On every old.reddit page, links to a user's profile go to their submitted posts, newest first (`old.reddit.com/user/<name>/submitted/?sort=new`), however you open them (click, middle-click, "Open in new tab"). Turn this off with `userLinksToSubmitted: false` in `SETTINGS`.

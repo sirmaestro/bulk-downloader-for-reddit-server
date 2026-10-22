@@ -49,6 +49,8 @@ class Configuration(Namespace):
         self.watchlist: Optional[str] = None
         # serve only: the address to listen on (default 127.0.0.1)
         self.host: Optional[str] = None
+        # serve only: where problems are POSTed (e.g. an ntfy topic URL)
+        self.notify: Optional[str] = None
         self.rename_existing: bool = False
         self.post_json: list[str] = []
         # serve only (no option): given posts may be looked up in Arctic Shift when their data isn't enough to

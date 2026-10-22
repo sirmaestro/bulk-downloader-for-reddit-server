@@ -122,6 +122,8 @@ class DownloadServer:
         self.scheduler = None
         # Posts that failed, tried again later (bdfr/retries.py), when serve keeps a retry list
         self.retries = None
+        # Where problems are sent (bdfr/notifier.py), with --notify
+        self.notifier = None
         # (priority, order, job): the userscript's jobs (0) run before the scheduler's (1), each in arrival order
         self._queue: "queue.PriorityQueue[tuple[int, int, Job]]" = queue.PriorityQueue()
         self._order = itertools.count()
@@ -272,6 +274,11 @@ class DownloadServer:
             return {"users": [], "enabled": False}
         return self.scheduler.snapshot()
 
+    def notify(self, message: str):
+        """Sends a problem to --notify's URL, if one is set"""
+        if self.notifier is not None:
+            self.notifier.notify(message)
+
     def recent_jobs(self) -> dict:
         """GET /jobs: the queued, running and last MAX_FINISHED_JOBS finished jobs, newest first"""
         with self._lock:
@@ -360,6 +367,7 @@ class DownloadServer:
             took = self._duration(time.time() - started)
             if error:
                 logger.warning(f"Failed after {took}: {error}")
+                self.notify(f"Job {job.id} failed ({self._describe(job)}): {error}")
             else:
                 logger.info(f"Done in {took}")
             if post_file:
@@ -527,6 +535,11 @@ def run_server(base_args: Configuration, port: int):
     token = load_token(config_directory)
     log_file = _log_to_file(base_args, config_directory)
     server = DownloadServer(base_args, root, token)
+    if base_args.notify:
+        from bdfr.notifier import Notifier
+
+        server.notifier = Notifier(base_args.notify)
+        logger.info(f"Problems are sent to {base_args.notify}")
     from bdfr.scheduler import BaselineScheduler
 
     watchlist = Path(base_args.watchlist).expanduser() if base_args.watchlist else config_directory / "watchlist.yaml"

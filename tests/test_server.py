@@ -431,3 +431,32 @@ def test_recent_jobs(server):
     assert newest["folder"] == "two" and newest["user"] == "someone" and newest["state"] == "done"
     assert newest["finished"] >= newest["created"] and "results" not in newest
     assert body["jobs"][1]["counts"]["new"] == 1
+
+
+def test_failed_jobs_are_notified(server, monkeypatch: pytest.MonkeyPatch):
+    download_server, base = server
+    download_server.notifier = MagicMock()
+
+    def fail(self):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(FakeDownloader, "download", fail)
+    _, job = call(base, "POST", "/jobs", {"folder": "someone", "posts": [{"id": "a"}]})
+    assert wait_for(base, job["id"])["state"] == "failed"
+    message = download_server.notifier.notify.call_args.args[0]
+    assert message.startswith(f"Job {job['id']} failed") and "someone" in message and "disk full" in message
+
+
+@pytest.mark.parametrize(
+    ("arguments", "environment"),
+    ((["--notify", "https://ntfy.example/bdfr"], {}), ([], {"BDFR_NOTIFY": "https://ntfy.example/bdfr"})),
+)
+def test_notify_option(tmp_path: Path, arguments: list, environment: dict):
+    from click.testing import CliRunner
+
+    from bdfr.__main__ import cli
+
+    captured = {}
+    with patch("bdfr.__main__.run_server", lambda config, port: captured.update(config=config)):
+        CliRunner(env=environment).invoke(cli, ["serve", str(tmp_path), *arguments])
+    assert captured["config"].notify == "https://ntfy.example/bdfr"

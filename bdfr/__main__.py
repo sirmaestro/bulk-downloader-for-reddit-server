@@ -183,6 +183,13 @@ SERVE_DEFAULTS = {
     help="YAML file of users whose folders are kept complete from Arctic Shift, checked weekly "
     "(default: watchlist.yaml next to BDFR's configuration).",
 )
+@click.option(
+    "--notify",
+    default=None,
+    envvar="BDFR_NOTIFY",
+    help="URL to POST problems to (failed jobs, watched users gone, failed posts given up), e.g. an ntfy topic "
+    "such as https://ntfy.sh/<topic>. Also read from BDFR_NOTIFY.",
+)
 @click.help_option("-h", "--help")
 @click.pass_context
 def cli_serve(context: click.Context, **_):

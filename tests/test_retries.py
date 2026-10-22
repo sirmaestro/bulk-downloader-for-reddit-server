@@ -99,3 +99,10 @@ def test_posts_a_retry_job_did_not_report_wait_for_the_next_try(retries: RetryLi
     assert retries.entries["someone/a"]["attempts"] == 2
     retries.tick()
     assert retries.server.submit.call_count == 1
+
+
+def test_giving_up_is_notified(retries: RetryList):
+    for _ in range(len(RetryList.BACKOFF_HOURS) + 1):
+        retries.note_job("someone", {"a": "failed"}, {"a": failed("a")})
+    retries.server.notify.assert_called_once()
+    assert "Giving up on post a in someone" in retries.server.notify.call_args.args[0]
