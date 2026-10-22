@@ -20,7 +20,7 @@ from typing import Optional
 
 from bdfr.exceptions import BulkDownloaderException
 from bdfr.file_name_formatter import FileNameFormatter
-from bdfr.hash_store import HashStore, _calc_hash
+from bdfr.hash_store import HashStore, hash_files
 from bdfr.post import Post
 from bdfr.resource import Resource
 
@@ -169,7 +169,7 @@ def build_hash_db(directory: Path, dry_run: bool, recursive: bool = True) -> int
     logger.info(f"{'Would add' if dry_run else 'Adding'} {len(files)} files to {new_db}{db_path.name}")
     if dry_run or not files:
         return len(files)
-    rows = [(file_hash, os.fsencode(str(path))) for path, file_hash in map(_calc_hash, files)]
+    rows = [(file_hash, os.fsencode(str(path))) for path, file_hash in hash_files(files)]
     connection = sqlite3.connect(db_path)
     try:
         with connection:

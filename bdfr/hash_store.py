@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import sqlite3
-from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from sqlite3 import Error, OperationalError
 from typing import Optional
@@ -29,6 +29,13 @@ def _calc_hash(existing_file: Path):
             chunk = file.read(chunk_size)
     file_hash = md5_hash.hexdigest()
     return existing_file, file_hash
+
+
+def hash_files(files: list[Path]) -> list[tuple[Path, str]]:
+    """(path, MD5) of each file, several at once: reading and MD5 release the GIL, so threads keep the disk and CPUs
+    busy without a process pool's start-up"""
+    with ThreadPoolExecutor(min(32, (os.cpu_count() or 1) + 4), thread_name_prefix="bdfr-hash") as pool:
+        return list(pool.map(_calc_hash, files))
 
 
 class HashStore:
@@ -232,8 +239,7 @@ class HashStore:
             files.extend(files_new)
         if files:
             logger.info(f"Calculating hashes for {len(files)} files not in the hash store yet")
-            with Pool() as pool:
-                results = pool.map(_calc_hash, files, chunksize=16)
+            results = hash_files(files)
         else:
             logger.debug("Every file in the download folder is already in the hash store")
             results = []
