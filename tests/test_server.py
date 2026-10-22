@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,6 +34,7 @@ class FakeDownloader:
         self.progress_callback = None
         self.errors = []
         self.newest_post = None
+        self.failed_posts = {}
 
     def download(self):
         post_ids = []
@@ -402,3 +403,16 @@ def test_watchlist_gone_endpoint(server, tmp_path: Path):
     assert call(base, "POST", "/watchlist/gone", {"user": "bad name!", "gone": None})[0] == 400
     assert call(base, "POST", "/watchlist/gone", {"user": "someone", "gone": None})[0] == 200
     assert [user["name"] for user in call(base, "GET", "/watchlist")[1]["users"]] == ["someone"]
+
+
+def test_retry_jobs_never_look_posts_up(server):
+    download_server, base = server
+    download_server.scheduler = MagicMock()
+    download_server.scheduler.folder_for = lambda folder: folder
+    download_server.scheduler.archive_lookups.return_value = True
+    job = download_server.submit({"folder": "someone", "posts": [{"id": "a"}]}, scheduled=True, retry=True)
+    assert wait_for(base, job.id)["retry"] is True
+    args, _ = FakeDownloader.runs[0]
+    assert args.archive_lookups is False
+    # The posts were noted when they first came
+    download_server.scheduler.note_posts.assert_not_called()

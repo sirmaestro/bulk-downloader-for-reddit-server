@@ -66,8 +66,9 @@ COPY --from=ffmpeg /opt/ffmpeg/LICENSE /usr/local/share/doc/ffmpeg/LICENSE
 FROM scratch
 COPY --from=app / /
 
-# BDFR's configuration (default_config.cfg, serve_token.txt, serve_log.txt, watchlist.yaml, watchlist_state.json) goes
-# to /config/bdfr; caches (yt-dlp) to /config/cache. Both must be writable by the container's user.
+# BDFR's configuration (default_config.cfg, serve_token.txt, serve_log.txt, watchlist.yaml, watchlist_state.json,
+# failed_posts.json) goes to /config/bdfr; caches (yt-dlp) to /config/cache. Both must be writable by the container's
+# user.
 ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     XDG_CONFIG_HOME=/config \
     XDG_CACHE_HOME=/config/cache \

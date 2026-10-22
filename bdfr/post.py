@@ -26,6 +26,10 @@ class Post:
         except KeyError:
             raise AttributeError(f"Post {self._data.get('id')} has no field '{name}'") from None
 
+    def to_dict(self) -> dict:
+        """The post's data, e.g. to give it to a later job"""
+        return dict(self._data)
+
     @property
     def author(self) -> Optional[str]:
         author = self._data.get("author")

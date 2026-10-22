@@ -38,6 +38,7 @@ class FakeDownloader:
         self.progress_callback = None
         self.errors = list(FakeDownloader.errors_to_report)
         self.newest_post = FakeDownloader.newest_post
+        self.failed_posts = {}
 
     def download(self):
         FakeDownloader.runs.append(self.args)

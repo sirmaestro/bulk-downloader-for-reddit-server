@@ -55,6 +55,7 @@ class Job:
         full_archive: bool = False,
         before: Optional[int] = None,
         after: Optional[int] = None,
+        retry: bool = False,
     ):
         self.id = job_id
         self.folder = folder
@@ -68,6 +69,8 @@ class Job:
         # With a user: read every post after this time, to the end (no stopping at downloaded posts), so gaps between
         # downloaded posts are filled
         self.after = after
+        # Posts from the failed-post retry list (bdfr/retries.py), downloaded without archive lookups
+        self.retry = retry
         # Called with the job once it has finished, whatever the outcome (used by the scheduler)
         self.on_finish: Optional[Callable[["Job"], None]] = None
         self.state = "queued"
@@ -93,6 +96,7 @@ class Job:
                 "folder": self.folder,
                 "mode": "user" if self.user else "posts",
                 "total": None if self.user else len(self.posts),
+                "retry": self.retry,
                 "state": self.state,
                 "error": self.error,
                 "counts": dict(self.counts),
@@ -109,6 +113,8 @@ class DownloadServer:
         self.current: Optional[Job] = None
         # The weekly baseline for watched users (bdfr/scheduler.py), when serve runs one
         self.scheduler = None
+        # Posts that failed, tried again later (bdfr/retries.py), when serve keeps a retry list
+        self.retries = None
         # (priority, order, job): the userscript's jobs (0) run before the scheduler's (1), each in arrival order
         self._queue: "queue.PriorityQueue[tuple[int, int, Job]]" = queue.PriorityQueue()
         self._order = itertools.count()
@@ -200,9 +206,16 @@ class DownloadServer:
             return set()
         return stored
 
-    def submit(self, payload: dict, on_finish: Optional[Callable[[Job], None]] = None, scheduled: bool = False) -> Job:
-        """Queues a job. Scheduled jobs (the watchlist's archive checks, which can take an hour) wait until no other
-        job is queued, so the userscript's syncs and Download clicks don't wait behind them."""
+    def submit(
+        self,
+        payload: dict,
+        on_finish: Optional[Callable[[Job], None]] = None,
+        scheduled: bool = False,
+        retry: bool = False,
+    ) -> Job:
+        """Queues a job. Scheduled jobs (the watchlist's archive checks, which can take an hour, and retries of failed
+        posts) wait until no other job is queued, so the userscript's syncs and Download clicks don't wait behind
+        them."""
         folder = self._folder(payload)
         posts, user = payload.get("posts"), payload.get("user")
         if posts is None and user is None:
@@ -220,9 +233,9 @@ class DownloadServer:
                 raise ValueError(f"'{name}' must be a time in seconds since 1970")
         if after is not None and user is None:
             raise ValueError("'after' needs a 'user'")
-        job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all", before, after)
+        job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all", before, after, retry)
         job.on_finish = on_finish
-        if posts and self.scheduler is not None:
+        if posts and self.scheduler is not None and not retry:
             # Posts read from Reddit by the userscript wake hibernating watched users
             self.scheduler.note_posts(posts)
         with self._lock:
@@ -258,6 +271,7 @@ class DownloadServer:
             "root": str(self.root),
             "running": self.current.id if self.current else None,
             "queued": self._queue.qsize(),
+            "retries": self.retries.snapshot() if self.retries else None,
         }
 
     def _worker(self):
@@ -292,6 +306,9 @@ class DownloadServer:
                 # Archive checks off for the folder's user (the watchlist's default): Arctic Shift isn't asked for
                 # anything, not even the data of single posts
                 args.archive_lookups = self.scheduler.archive_lookups(job.folder)
+            if job.retry:
+                # The posts' data is what the first job had, so the archive has nothing to add
+                args.archive_lookups = False
         if job.user:
             # The page's posts are downloaded first, then the user's listing: until already-downloaded posts, or all
             # of it. Posts already in the folder are recognised from their IDs without requests, so reading the whole
@@ -309,10 +326,12 @@ class DownloadServer:
         logger.debug(f"Options: {self._options(args)}")
         # The outcome is published once the job is cleaned up, so whoever sees it finished sees it complete
         state, error = "failed", None
+        failed_posts: dict[str, tuple[dict, str]] = {}
         try:
             # Its lines go to serve_log.txt with the server's, so it opens no log file of its own
             downloader = Downloader(args, log_file=False)
             downloader.progress_callback = job.record
+            failed_posts = downloader.failed_posts
             downloader.download()
             job.newest_post = downloader.newest_post
             if downloader.errors:
@@ -332,6 +351,11 @@ class DownloadServer:
                 logger.info(f"Done in {took}")
             if post_file:
                 post_file.unlink(missing_ok=True)
+            if self.retries is not None:
+                try:
+                    self.retries.note_job(job.folder, dict(job.results), failed_posts)
+                except Exception:
+                    logger.exception("Recording failed posts for a retry failed")
             job.error = error
             job.state = state
             job.finished = time.time()
@@ -384,6 +408,8 @@ class DownloadServer:
             if job.before:
                 source += f" older than {time.strftime('%Y-%m-%d %H:%M', time.localtime(job.before))}"
             source += f" (with {len(job.posts)} from the page)" if job.posts else ""
+        elif job.retry:
+            source = f"{len(job.posts)} failed posts to retry"
         else:
             source = f"{len(job.posts)} posts from a page"
         return f"{source} into {self.root / job.folder}"
@@ -491,6 +517,10 @@ def run_server(base_args: Configuration, port: int):
     watchlist = Path(base_args.watchlist).expanduser() if base_args.watchlist else config_directory / "watchlist.yaml"
     server.scheduler = BaselineScheduler(server, watchlist)
     server.scheduler.start()
+    from bdfr.retries import RetryList
+
+    server.retries = RetryList(server, config_directory / "failed_posts.json")
+    server.retries.start()
     logger.info(f"Watched users are read from {watchlist}" + ("" if watchlist.exists() else " (not there yet)"))
     host = base_args.host or "127.0.0.1"
     httpd = ThreadingHTTPServer((host, port), make_handler(server))

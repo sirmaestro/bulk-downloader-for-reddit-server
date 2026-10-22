@@ -13,6 +13,7 @@ import pytest
 from bdfr.__main__ import SERVE_DEFAULTS
 from bdfr.configuration import Configuration
 from bdfr.resource import Resource
+from bdfr.retries import HOUR, RetryList
 from bdfr.scheduler import BaselineScheduler
 from bdfr.server import DownloadServer, Job
 from bdfr.site_downloaders.base_downloader import BaseDownloader
@@ -45,7 +46,10 @@ def serve(tmp_path: Path, archive: MockArcticShift) -> DownloadServer:
 
 
 def run(serve: DownloadServer, payload: dict) -> Job:
-    job = serve.submit(payload)
+    return wait(serve.submit(payload))
+
+
+def wait(job: Job) -> Job:
     deadline = time.time() + 30
     while not job.finished:
         if time.time() > deadline:
@@ -188,3 +192,25 @@ def test_post_failing_part_way_is_not_known_until_finished(
     assert job.state == "done"
     assert len(files(serve, "someone")) == 2
     assert serve.known_posts(known)["known"] == ["abc0001"]
+
+
+def test_failed_post_is_retried_without_archive_requests(
+    serve: DownloadServer, archive: MockArcticShift, tmp_path: Path
+):
+    clock = [NOW]
+    serve.retries = RetryList(serve, tmp_path / "failed_posts.json", lambda: clock[0])
+    post = archive.add_post("abc0001", NOW)
+    media = archive.media.pop("abc0001.jpg")
+    job = run(serve, {"folder": "someone", "posts": [post]})  # the media is missing: 404
+    assert job.results == {"abc0001": "failed"}
+    assert serve.status()["retries"] == {"waiting": 1, "given_up": 0}
+
+    archive.media["abc0001.jpg"] = media
+    archive.requests.clear()
+    clock[0] += HOUR
+    serve.retries.tick()
+    retry = wait(next(j for j in serve.jobs.values() if j.retry))
+    assert retry.results == {"abc0001": "new"}
+    assert len(files(serve, "someone")) == 1
+    assert archive.requests == []
+    assert serve.status()["retries"] == {"waiting": 0, "given_up": 0}

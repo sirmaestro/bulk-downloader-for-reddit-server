@@ -80,6 +80,8 @@ class Downloader(Connector):
         self.progress_callback: Optional[Callable[[str, Optional[bool], str], None]] = None
         # Why listings were stopped before their end in download(); the run didn't see everything it was asked to
         self.errors: list[str] = []
+        # Submissions that failed (an error, not filtered out): ID -> (post data, reason), for serve's retry list
+        self.failed_posts: dict[str, tuple[dict, str]] = {}
         # When the newest submission the run went through was posted (whatever happened to it), or None
         self.newest_post: Optional[float] = None
 
@@ -117,13 +119,16 @@ class Downloader(Connector):
                     result, outcome = run
                     number += 1
                     self._log_outcome(number, submission, result, outcome)
-                    totals[self.log_label(result, outcome)] += 1
+                    label = self.log_label(result, outcome)
+                    totals[label] += 1
+                    if label == "failed":
+                        self.failed_posts[submission.id] = (submission.to_dict(), outcome["skip_reason"])
                     totals["files"] += outcome["files"]["written"] + outcome["files"]["linked"]
                     created = getattr(submission, "created_utc", None)
                     if isinstance(created, (int, float)) and (self.newest_post is None or created > self.newest_post):
                         self.newest_post = created
                     if self.progress_callback:
-                        self.progress_callback(submission.id, result, self.log_label(result, outcome))
+                        self.progress_callback(submission.id, result, label)
                     if not stop_enabled:
                         return False
                     stop, consecutive_existing = self._stop_at_existing_reached(result, consecutive_existing)
