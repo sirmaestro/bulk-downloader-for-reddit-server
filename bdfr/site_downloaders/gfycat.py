@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import re
+import urllib.parse
 
 from bdfr.configuration import Configuration
 from bdfr.exceptions import SiteDownloaderError
@@ -21,7 +22,9 @@ class Gfycat(Redgifs):
 
     @staticmethod
     def _get_link(url: str) -> set[str]:
-        match = re.match(r".*/(?:ifr/|gifs/detail/)?([A-Za-z]+)(?:[-./?#].*)?$", url.rstrip("/"))
+        # Only the path: a link without an ID (e.g. https://gfycat.com/) must not take the host name for one
+        path = urllib.parse.urlsplit(url).path.rstrip("/")
+        match = re.match(r".*/(?:ifr/|gifs/detail/)?([A-Za-z]+)(?:[-./?#].*)?$", path)
         if not match:
             raise SiteDownloaderError(f"Could not extract Gfycat ID from {url}")
         return Redgifs._get_link(f"https://www.redgifs.com/watch/{match.group(1).lower()}")
