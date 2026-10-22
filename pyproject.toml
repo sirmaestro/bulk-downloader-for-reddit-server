@@ -27,6 +27,10 @@ version = {attr = "bdfr.__version__"}
 bdfr = ["default_config.cfg"]
 
 [project.optional-dependencies]
+# bdfr similar (perceptual hashes); not needed by serve, so not in the Docker image
+similar = [
+    "Pillow>=12.0.0",
+]
 dev = [
     "black>=26.10.1",
     "flake8>=7.4.1",

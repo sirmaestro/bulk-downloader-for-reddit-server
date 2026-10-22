@@ -12,6 +12,7 @@ from bdfr.downloader import Downloader
 from bdfr.merger import merge_folders, merge_summary
 from bdfr.renamer import Renamer, rename_directory
 from bdfr.server import DEFAULT_PORT, run_server
+from bdfr.similar import report_similar
 
 logger = logging.getLogger()
 
@@ -283,6 +284,34 @@ def cli_merge(old: str, new: str, dry_run: bool, verbose: int):
     store recorded. Run it where serve runs (e.g. in its container), while serve isn't working on either folder."""
     logging.getLogger().addHandler(make_console_logging_handler(verbose))
     logger.info(merge_summary(merge_folders(Path(old), Path(new), dry_run), dry_run))
+
+
+@cli.command("similar")
+@click.argument("directory", type=str)
+@click.option("--folder", "folders", multiple=True, help="Only compare these folders under DIRECTORY (repeatable).")
+@click.option(
+    "--threshold",
+    type=click.IntRange(0, 16),
+    default=4,
+    show_default=True,
+    help="How many of the 64 bits two images' perceptual hashes may differ by and still count as alike.",
+)
+@click.option(
+    "--min-shared",
+    type=click.IntRange(1),
+    default=3,
+    show_default=True,
+    help="Look-alikes for two folders to be listed.",
+)
+@click.option("-v", "--verbose", count=True)
+@click.help_option("-h", "--help")
+def cli_similar(directory: str, folders: tuple, threshold: int, min_shared: int, verbose: int):
+    """Finds images that look alike although their files differ, in the folders under DIRECTORY, offline.
+
+    Lists re-uploads within a folder and folders sharing many images (likely one person's old and new accounts).
+    Needs Pillow (pip install "bdfr[similar]"); each folder's hashes are kept in its phashes.sqlite."""
+    logging.getLogger().addHandler(make_console_logging_handler(verbose))
+    report_similar(Path(directory), list(folders), threshold, min_shared)
 
 
 def silence_module_loggers():

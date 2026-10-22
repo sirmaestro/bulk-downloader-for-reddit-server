@@ -94,6 +94,8 @@ Archive checks also decide whether posts the userscript sends (its background sy
 
 To move a user's old account into their new one, run `bdfr merge OLD_FOLDER NEW_FOLDER` (add `--dry-run` to see what it would do first), then list the old name under `aliases`, as it suggests. It works offline: files whose content the new folder already has stay in the old folder, the rest are moved (a file whose name the new folder uses for something else stays too, with a warning), and the new folder's hash store gains their hashes and every link the old folder's store recorded, after backing itself up (`hashes.sqlite.before-merge-...`). Delete the old folder once you've looked at what's left. Run it where serve runs, e.g. `docker compose exec bdfr bdfr merge /data/old_account /data/new_account`, so stored paths match, and while serve isn't working on either folder. Jobs and checks for the old name (e.g. Download on the old account's page) go to the new folder.
 
+To find such moves, and pictures saved twice from re-uploads, `bdfr similar DIRECTORY` compares the images in the folders under DIRECTORY by how they look (a perceptual hash), so resized or recompressed copies match although their files differ. It lists look-alike pairs within each folder and pairs of folders sharing at least `--min-shared` (3) pictures; `--folder NAME` (repeatable) compares only those folders, and `--threshold` (4 of 64 bits) sets how alike they must be. It needs Pillow (`pip install "bdfr[similar]"`, not in the Docker image), works offline, only reads images (not videos), and keeps each folder's hashes in its `phashes.sqlite` so later runs only hash new files. It changes nothing else: merge or delete what it finds yourself.
+
 
 ### Running in Docker
 

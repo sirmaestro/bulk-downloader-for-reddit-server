@@ -311,9 +311,16 @@ class HashStore:
 
     @staticmethod
     def _is_own_file(name: str) -> bool:
-        """BDFR's hash stores, their backups, `bdfr rename` undo lists and downloads in progress live in the download
-        directory but are not downloads"""
-        own = ("hash_list.json", "hash_file_list.json", "hash_url_list.json", "bdfr-rename-", TEMP_PREFIX)
+        """BDFR's hash stores, their backups, `bdfr rename` undo lists, downloads in progress and `bdfr similar`'s
+        cache live in the download directory but are not downloads"""
+        own = (
+            "hash_list.json",
+            "hash_file_list.json",
+            "hash_url_list.json",
+            "bdfr-rename-",
+            TEMP_PREFIX,
+            "phashes.sqlite",
+        )
         return name.startswith(own) or name.startswith(HASH_DB_NAME)
 
     def _hashed_files_in_db(self) -> Optional[set[str]]:

@@ -5,7 +5,7 @@ A personal fork of BDFR (Bulk Downloader for Reddit) for keeping folders of Redd
 ## Commands
 
 ```bash
-python -m pip install -e ".[dev]" && pre-commit install     # once; then use `python -m bdfr ...` or `bdfr ...`
+python -m pip install -e ".[dev,similar]" && pre-commit install     # once; then use `python -m bdfr ...` or `bdfr ...`
 python -m pytest tests -q
 python -m isort bdfr tests && python -m black bdfr tests     # format; CI fails on unformatted code
 python -m flake8 bdfr tests                                  # lint
@@ -31,7 +31,7 @@ Rules:
 
 ## Layout
 
-- `bdfr/__main__.py`: click CLI with `download`, `serve`, `rename` and `merge`. Options are lists of decorators (`_common_options`, `_downloader_options`); a new option also needs a default in `configuration.py`.
+- `bdfr/__main__.py`: click CLI with `download`, `serve`, `rename`, `merge` and `similar`. Options are lists of decorators (`_common_options`, `_downloader_options`); a new option also needs a default in `configuration.py`.
 - `bdfr/configuration.py`: `Configuration`, the defaults for every option (`args` everywhere).
 - `bdfr/post.py`: `Post`, a post's JSON fields as attributes (`author` and `subreddit` are plain names; a deleted author is `None`).
 - `bdfr/connector.py`: `Connector`, the base of `Downloader`. Loads config and logging, and builds `self.listings` (lazy generators of posts per source; given posts are `self.post_list`).
@@ -42,6 +42,7 @@ Rules:
 - `bdfr/logs.py`: the log format for the console and files (`2026-10-21 09:09:15 INFO    job 3fd9e1485ded, post 1xbgyxi: message`), `TRACE` (level 9, `-vv`). The job and post come from context variables (`job_context`, set by `server._run`; `post_context`, set by `Downloader._run_one`), so messages don't repeat them; download threads run in a copy of the submitting thread's context. Each post gets one INFO line from `Downloader._log_outcome` (`new - 1 file written (#1, r/pics, Direct)`; a WARNING when it failed): end early with `self._skip(reason)` (filtered, nothing to download) or `self._fail(reason)` (an error), and count files in `self._files`; per-file lines are DEBUG. `serve` logs everything, its jobs included, to one size-rotated `serve_log.txt` (`server._log_to_file`); its jobs' downloaders open no log file (`log_file=False`). `bdfr download` starts a new `log_output.txt` per run.
 - `bdfr/file_name_formatter.py`: file and folder names from schemes.
 - `bdfr/renamer.py`: `bdfr rename`, offline renaming between file schemes: parses old names with a regex built from the old scheme, takes `{DATE}` from modified times, formats new names with `FileNameFormatter`, and updates the hash store; `--build-hash-db` creates/completes `hashes.sqlite` from file contents (no URLs). It must stay network-free (tests block sockets).
+- `bdfr/similar.py`: `bdfr similar`, offline: 64-bit pHash (Pillow only, DCT in Python; the `similar` extra, kept out of the Docker image), cached per folder in `phashes.sqlite` (an own file) by name, size and mtime; look-alike pairs found by splitting hashes into threshold + 1 pieces (pigeonhole) rather than comparing every pair. Writes nothing but the caches.
 - `bdfr/notifier.py`: `Notifier`, serve's `--notify URL` (`BDFR_NOTIFY`): `server.notify(message)` (failed jobs in `_run_job`, `note_gone` changes, retries given up) queues a line; lines are batched (60 s) and spaced (15 min) and POSTed as text with a `Title` header (ntfy's format). A failed send is only logged.
 - `bdfr/merger.py`: `bdfr merge OLD NEW`, offline: hashes both folders' files (reading stored hashes where the paths match), moves files whose content NEW lacks and whose name is free, and adds their hashes and all of OLD's stored links to NEW's store (either mode, `back_up_hash_store` first). Never deletes anything.
 - `bdfr/server.py`: `bdfr serve`, an HTTP server on 127.0.0.1 (or `--host`, e.g. 0.0.0.0 in Docker; token in `X-BDFR-Token`, or `BDFR_TOKEN`) that queues jobs from the userscript and runs them one at a time with `Downloader`, reporting per-post results via `progress_callback`, lists recent jobs (`GET /jobs`, `Job.summary()`: no per-post results; the userscript's Status view), and answers `/known` (which post IDs already have files in a folder, read from file names containing `{POSTID}`, plus posts whose link (`links`: {ID: URL}, normalised with `downloader.post_link`) is in the folder's hash store, read with a separate read-only SQLite connection). `serve` applies `SERVE_DEFAULTS` from `__main__.py` before `--opts` and command line options; `--no-defaults` skips them. Jobs only write to one folder directly under the served directory. A job with `after` reads a user's listing back to that time with `--stop-at-existing` off.
