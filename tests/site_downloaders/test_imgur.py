@@ -82,7 +82,7 @@ def test_requests_send_user_agent(test_url: str, api_data: dict, monkeypatch: py
 
     get = Mock(return_value=Mock(url="", history=[], status_code=200, content=b"image"))
     monkeypatch.setattr(Imgur, "retrieve_url", staticmethod(retrieve_url))
-    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(requests.Session, "get", get)
     mock_submission = Mock()
     mock_submission.url = test_url
     config = Configuration()

@@ -3,9 +3,10 @@
 
 import json
 import re
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, PropertyMock
 
 import pytest
+import requests
 
 from bdfr.configuration import Configuration
 from bdfr.resource import Resource
@@ -143,3 +144,26 @@ def test_get_link_without_hd(urls: dict, expected: set[str], monkeypatch: pytest
     monkeypatch.setattr(Redgifs, "retrieve_url", staticmethod(lambda url, headers=None: Mock(text=json.dumps(gif))))
     monkeypatch.setattr(Redgifs, "_url_is_accessible", staticmethod(lambda url, headers, timeout: True))
     assert Redgifs._get_link("https://www.redgifs.com/watch/lumberinghomelynurseshark") == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "accessible", "body_read"),
+    (
+        (206, True, True),  # the range was honoured: its byte is read, so the connection can be reused
+        (200, True, False),  # the range was ignored: the whole video isn't read just to check the link
+        (404, False, False),
+    ),
+)
+def test_url_is_accessible_asks_for_one_byte(
+    status: int, accessible: bool, body_read: bool, monkeypatch: pytest.MonkeyPatch
+):
+    response = MagicMock(status_code=status, ok=status < 400)
+    response.__enter__.return_value = response
+    content = PropertyMock(return_value=b"x")
+    type(response).content = content
+    get = Mock(return_value=response)
+    monkeypatch.setattr(requests.Session, "get", get)
+    assert Redgifs._url_is_accessible("https://media.redgifs.com/A.mp4", {"referer": "x"}, 10) is accessible
+    assert get.call_args.kwargs["headers"] == {"referer": "x", "Range": "bytes=0-0"}
+    assert get.call_args.kwargs["stream"] is True
+    assert content.called is body_read

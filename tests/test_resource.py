@@ -53,7 +53,7 @@ def fake_response(url: str, status: int = 200, content: bytes = b"data", redirec
 
 def test_download_sends_given_headers(monkeypatch: pytest.MonkeyPatch):
     get = MagicMock(return_value=fake_response("https://i.imgur.com/a.jpg"))
-    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(requests.Session, "get", get)
     download = Resource.retry_download("https://i.imgur.com/a.jpg", {"User-Agent": "bdfr/test"})
     assert download({"max_wait_time": 120}) == b"data"
     assert get.call_args.kwargs["headers"] == {"User-Agent": "bdfr/test"}
@@ -62,6 +62,6 @@ def test_download_sends_given_headers(monkeypatch: pytest.MonkeyPatch):
 def test_download_of_removed_placeholder_fails(monkeypatch: pytest.MonkeyPatch):
     # Imgur redirects deleted images to a placeholder image, which must not be saved as the image
     get = MagicMock(return_value=fake_response("https://i.imgur.com/removed.png", redirected=True))
-    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(requests.Session, "get", get)
     with pytest.raises(BulkDownloaderException, match="Removed from the host"):
         Resource.http_download("https://i.imgur.com/a.jpg", {})

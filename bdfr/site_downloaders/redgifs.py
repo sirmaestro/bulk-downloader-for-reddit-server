@@ -11,7 +11,7 @@ import requests
 from bdfr.configuration import Configuration
 from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
 from bdfr.post import Post
-from bdfr.resource import Resource
+from bdfr.resource import Resource, http_session
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 
@@ -42,9 +42,16 @@ class Redgifs(BaseDownloader):
 
     @staticmethod
     def _url_is_accessible(url: str, headers: dict, timeout: int) -> bool:
-        # Only the status is needed; the body (the whole video) is downloaded later by the Resource
+        # Only the status is needed; the body (the whole video) is downloaded later by the Resource. Asking for one
+        # byte lets that byte be read, so the connection goes back to this thread's session and the download reuses it
+        # (a new connection to the media host takes about a second). A host ignoring the range answers 200 with the
+        # whole video, which is left unread, as before.
         try:
-            with requests.get(url, headers=headers, timeout=timeout, stream=True) as response:
+            with http_session().get(
+                url, headers={**headers, "Range": "bytes=0-0"}, timeout=timeout, stream=True
+            ) as response:
+                if response.status_code == 206:
+                    response.content
                 return response.ok
         except requests.exceptions.RequestException as e:
             raise SiteDownloaderError(f"Could not access Redgifs URL {url}: {e}")

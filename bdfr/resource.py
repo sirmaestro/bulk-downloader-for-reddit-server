@@ -5,6 +5,7 @@ import _hashlib
 import hashlib
 import logging
 import re
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -19,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 # Placeholder images that hosts redirect deleted media to; they must not be saved as the media
 REMOVED_PLACEHOLDERS = frozenset({"https://i.imgur.com/removed.png"})
+
+_thread_sessions = threading.local()
+
+
+def http_session() -> requests.Session:
+    """This thread's session, so requests to a host it has already contacted reuse the connection instead of opening
+    a new one (e.g. a site downloader's check of a media URL, then the download). Sessions aren't thread-safe, hence
+    one per thread; it goes when the thread ends."""
+    session = getattr(_thread_sessions, "session", None)
+    if session is None:
+        session = _thread_sessions.session = requests.Session()
+    return session
 
 
 class Resource:
@@ -74,7 +87,7 @@ class Resource:
             max_wait_time = 300 if not fail_fast else 10
         while True:
             try:
-                response = requests.get(url, headers=headers, timeout=120)
+                response = http_session().get(url, headers=headers, timeout=120)
                 if response.history and response.url in REMOVED_PLACEHOLDERS:
                     raise BulkDownloaderException(f"Removed from the host (redirected to {response.url})")
                 if re.match(r"^2\d{2}", str(response.status_code)) and response.content:
