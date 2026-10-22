@@ -183,12 +183,12 @@ def build_hash_db(directory: Path, dry_run: bool, recursive: bool = True) -> int
     return len(files)
 
 
-def back_up_hash_store(directory: Path, stamp: str) -> list[Path]:
+def back_up_hash_store(directory: Path, stamp: str, action: str = "rename") -> list[Path]:
     backups = []
     for name in ("hashes.sqlite", "hash_list.json", "hash_file_list.json", "hash_url_list.json"):
         source = directory / name
         if source.exists():
-            backup = directory / f"{name}.before-rename-{stamp}"
+            backup = directory / f"{name}.before-{action}-{stamp}"
             shutil.copy2(source, backup)
             backups.append(backup)
     return backups

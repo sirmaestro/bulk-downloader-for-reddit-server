@@ -9,6 +9,7 @@ import click
 from bdfr import __version__, logs
 from bdfr.configuration import Configuration
 from bdfr.downloader import Downloader
+from bdfr.merger import merge_folders, merge_summary
 from bdfr.renamer import Renamer, rename_directory
 from bdfr.server import DEFAULT_PORT, run_server
 
@@ -260,6 +261,21 @@ def cli_rename(
 
 def make_console_logging_handler(verbosity: int) -> logging.Handler:
     return logs.console_handler(verbosity)
+
+
+@cli.command("merge")
+@click.argument("old", type=str)
+@click.argument("new", type=str)
+@click.option("--dry-run", is_flag=True, help="Only show what would be moved.")
+@click.option("-v", "--verbose", count=True)
+@click.help_option("-h", "--help")
+def cli_merge(old: str, new: str, dry_run: bool, verbose: int):
+    """Moves the downloads in OLD (e.g. a user's folder from an old account) into NEW, offline.
+
+    Files whose content NEW already has stay in OLD; NEW's hash store gains the moved files and every link OLD's
+    store recorded. Run it where serve runs (e.g. in its container), while serve isn't working on either folder."""
+    logging.getLogger().addHandler(make_console_logging_handler(verbose))
+    logger.info(merge_summary(merge_folders(Path(old), Path(new), dry_run), dry_run))
 
 
 def silence_module_loggers():
