@@ -299,7 +299,7 @@ def test_known_posts_by_link(server, tmp_path: Path, store: str):
                 "keep_hashes_db": True,
                 "folder_scheme": "",
                 "file_scheme": "{POSTID}_{TITLE}",
-                "parallel": 8,
+                "parallel": 4,
             },
         ),
         (
