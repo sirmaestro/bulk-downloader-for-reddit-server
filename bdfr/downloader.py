@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import contextlib
 import contextvars
 import logging
 import os
@@ -37,6 +38,12 @@ def duplicate_post_key(post_id: str) -> str:
     """The URL-table key that records a post whose media was all already downloaded under other links, so it's known
     (by `bdfr serve`'s /known, and by later runs) without downloading it again"""
     return f"post:{post_id}"
+
+
+def incomplete_post_key(post_id: str) -> str:
+    """The URL-table key that records a post that failed after some of its files were written (e.g. a gallery that
+    stopped part-way). Its ID is then in file names, but the post isn't known until a run finishes it."""
+    return f"incomplete:{post_id}"
 
 
 def post_ids_in_names(names) -> set[str]:
@@ -205,8 +212,19 @@ class Downloader(Connector):
                 self._fail(f"unexpected error: {e}")
             finally:
                 with self._store_lock:
+                    self._note_incomplete(submission)
                     self._commit_hash_db()
         return result, self._outcome.state
+
+    def _note_incomplete(self, submission: Post):
+        """Records a submission that failed after writing some of its files as incomplete, so it isn't taken as
+        downloaded from its ID in their names; forgets that once a run of it doesn't fail (under _store_lock)"""
+        key = incomplete_post_key(submission.id)
+        if self._state()["failed"]:
+            if self._files["written"] or self._files["linked"]:
+                self._check_url_exists_or_add(key, "incomplete")
+        elif self._check_url_exists_or_add(key, None):
+            self._forget_url(key)
 
     @staticmethod
     def _new_state() -> dict:
@@ -303,12 +321,22 @@ class Downloader(Connector):
             # Renaming needs each resource's new destination, so the post goes through the normal checks
             return False
         with self._store_lock:
+            if self._incomplete(submission):
+                return False
             if submission.id in self._folder_post_ids():
                 self._files["known_post"] += 1
                 return True
             if self._check_url_exists_or_add(duplicate_post_key(submission.id), None):
                 self._files["known_duplicate"] += 1
                 return True
+        return False
+
+    def _incomplete(self, submission: Post) -> bool:
+        """Whether the submission failed after writing some of its files (see _note_incomplete); its files are then
+        checked one by one (under _store_lock)"""
+        if self._check_url_exists_or_add(incomplete_post_key(submission.id), None):
+            logger.debug("Its files are incomplete; checking each")
+            return True
         return False
 
     def _folder_post_ids(self) -> set:
@@ -328,6 +356,8 @@ class Downloader(Connector):
             return False
         link = self._post_link(submission)
         with self._store_lock:
+            if self._incomplete(submission):
+                return False
             known = self._check_url_exists_or_add(link, None) or link in self._run_urls()
         if known:
             logger.debug(f"Its link was downloaded before: {link}")
@@ -545,6 +575,9 @@ class Downloader(Connector):
                             file.write(res.content)
                         logger.debug(f"Wrote {destination}")
                     except OSError as e:
+                        # A partly written file would make the post look downloaded (its ID is in the name)
+                        with contextlib.suppress(OSError):
+                            destination.unlink(missing_ok=True)
                         return self._fail(f"could not write {destination.name}: {e}")
                     self._files["written"] += 1
                     self._folder_post_ids().add(submission.id)

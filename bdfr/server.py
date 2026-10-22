@@ -26,7 +26,7 @@ import platformdirs
 
 from bdfr import __version__, logs
 from bdfr.configuration import Configuration
-from bdfr.downloader import Downloader, duplicate_post_key, post_ids_in_names, post_link
+from bdfr.downloader import Downloader, duplicate_post_key, incomplete_post_key, post_ids_in_names, post_link
 from bdfr.hash_store import HashStore
 
 logger = logging.getLogger(__name__)
@@ -143,6 +143,8 @@ class DownloadServer:
             # counting
             names = (name for name in filenames if not HashStore._is_own_file(name))
             found.update(wanted.intersection(post_ids_in_names(names)))
+        # Posts that failed after writing some of their files aren't known from their names
+        found -= self._stored_keys(self.root / folder, {incomplete_post_key(i): i for i in found})
         # Posts recorded as all duplicates
         duplicates = self._stored_keys(self.root / folder, {duplicate_post_key(i): i for i in wanted - found})
         # Posts whose link was downloaded before, by any post (reposts); see Downloader._remember_post_link

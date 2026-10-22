@@ -12,8 +12,11 @@ import pytest
 
 from bdfr.__main__ import SERVE_DEFAULTS
 from bdfr.configuration import Configuration
+from bdfr.resource import Resource
 from bdfr.scheduler import BaselineScheduler
 from bdfr.server import DownloadServer, Job
+from bdfr.site_downloaders.base_downloader import BaseDownloader
+from bdfr.site_downloaders.download_factory import DownloadFactory
 from tests.mock_arctic_shift import MockArcticShift
 
 NOW = 1_790_000_000
@@ -156,3 +159,32 @@ def test_posts_for_users_without_archive_checks_are_not_looked_up(
     assert job.state == "done"
     assert job.results == {"abc0001": "skipped"}
     assert archive.requests == []
+
+
+@pytest.mark.parametrize("store", ("db", "json"))
+def test_post_failing_part_way_is_not_known_until_finished(
+    serve: DownloadServer, archive: MockArcticShift, monkeypatch: pytest.MonkeyPatch, store: str
+):
+    """A post whose second file fails after the first was written (e.g. a gallery) has its ID in a file name, but must
+    not count as downloaded until a later job finishes it"""
+    serve.base_args.keep_hashes_db = store == "db"
+    serve.base_args.keep_hashes = store == "json"
+    post = archive.add_post("abc0001", NOW)
+    urls = [f"{archive.base}/media/abc0001.jpg", f"{archive.base}/media/abc0001_b.jpg"]
+
+    class TwoFiles(BaseDownloader):
+        def find_resources(self) -> list[Resource]:
+            return [Resource(self.post, url, Resource.retry_download(url)) for url in urls]
+
+    monkeypatch.setattr(DownloadFactory, "pull_lever", staticmethod(lambda url: TwoFiles))
+    known = {"folder": "someone", "ids": ["abc0001"]}
+
+    run(serve, {"folder": "someone", "posts": [post]})  # the mock has no second file yet: 404
+    assert len(files(serve, "someone")) == 1
+    assert serve.known_posts(known)["known"] == []
+
+    archive.media["abc0001_b.jpg"] = b"second image"
+    job = run(serve, {"folder": "someone", "posts": [post]})
+    assert job.state == "done"
+    assert len(files(serve, "someone")) == 2
+    assert serve.known_posts(known)["known"] == ["abc0001"]

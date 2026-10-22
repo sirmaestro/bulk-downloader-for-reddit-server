@@ -404,6 +404,16 @@ class HashStore:
                 self._hash_list_save(True)
         return False
 
+    def _forget_url(self, url: str):
+        """Removes a key from the URL table"""
+        if self.args.keep_hashes_db:
+            self._hash_db.execute("DELETE FROM hashes_url WHERE url = ?", (url,))
+            if not self._defer_commits:
+                self._hash_db.commit()
+        elif self.args.keep_hashes:
+            if self.master_url_list.pop(url, None) is not None:
+                self._hash_list_save(True)
+
     def _get_hashed_item(self, hash: str) -> Path:
         if self.args.keep_hashes_db:
             query = "SELECT file_path FROM hashes WHERE hash = ?"
