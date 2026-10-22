@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.11
+// @version      4.12
 // @description  Downloads the posts on old.reddit pages through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @grant        GM_getValue
@@ -110,7 +110,9 @@
     // don't slow down in background tabs as they do the page's.
     // user (lower case) -> { lastSuccess, lastSent, newestPost }, { lastError, lastAttempt } or { gone, lastAttempt }
     const SYNC_STATE_KEY = "bdfr-sync";
-    const SYNC_LOCK_KEY = "bdfr-sync-lock"; // { owner: tab, until: time } while a tab syncs
+    // { owner: tab, until: time, page: its address, status: its progress } while a tab syncs
+    const SYNC_LOCK_KEY = "bdfr-sync-lock";
+    const SYNC_TITLE_MARK = "⟳ "; // starts the syncing tab's title while it syncs a user, so it can be found
     const SYNC_GAP_KEY = "bdfr-sync-request-gap"; // milliseconds between requests to Reddit
     const SYNC_RUN_KEY = "bdfr-sync-run"; // { started } while a Sync now hasn't got through every user
     const SYNC_RUN_RESUME_MS = 24 * 3600 * 1000; // an unfinished Sync now older than this starts again from the top
@@ -129,6 +131,7 @@
     let redditPausedUntil = 0; // Reddit's rate limit window is (nearly) used up until then
     let syncing = false; // this tab is syncing (the lock alone doesn't stop the same tab starting twice)
     let stopSync = false; // the Sync button was pressed again: stop after the current user
+    let syncStatus = ""; // the running sync's latest report, kept in the lock for other tabs
     let syncProgress = () => {}; // the running sync's report, for waits on Reddit's rate limit
     // Where a sync started with "Sync now" reports its progress: the panel's status line on pages with the panel
     let reportSync = (text) => console.info(`BDFR sync: ${text}`);
@@ -151,9 +154,17 @@
     // unfinished earlier forced sync already synced. report gets progress and a summary.
     async function backgroundSync({ force = false, report = () => {} } = {}) {
         if (!GM_getValue(TOKEN_KEY, "")) return;
-        if (syncing || !takeSyncLock()) return report("Another tab is already syncing");
+        if (syncing) return report("This tab is already syncing");
+        if (!takeSyncLock()) return report(otherSyncTab());
         syncing = true;
         stopSync = false;
+        const show = report;
+        // Every report also goes into the lock (renewing it), where other tabs' Sync buttons read it
+        report = (text) => {
+            syncStatus = text;
+            takeSyncLock();
+            show(text);
+        };
         syncProgress = report;
         try {
             let watchlist;
@@ -199,8 +210,8 @@
                     return report(`Sync stopped: ${carriedOver + synced + gone} of ${users.length} users done · `
                         + `${sentTotal} new posts sent · Sync carries on from u/${user.name}`);
                 }
+                markSyncTab(true);
                 report(`Syncing u/${user.name} (${index + 1}/${users.length})…`);
-                takeSyncLock(); // renewed for each user
                 let serverDown = null;
                 try {
                     const { sent, newest } = await syncUser(user);
@@ -238,6 +249,8 @@
             syncing = false;
             stopSync = false;
             syncProgress = () => {};
+            syncStatus = "";
+            markSyncTab(false);
             releaseSyncLock();
         }
     }
@@ -312,13 +325,30 @@
     function takeSyncLock() {
         const lock = GM_getValue(SYNC_LOCK_KEY, null);
         if (lock && lock.owner !== syncTab && lock.until > Date.now()) return false;
-        GM_setValue(SYNC_LOCK_KEY, { owner: syncTab, until: Date.now() + SYNC_LOCK_MS });
+        GM_setValue(SYNC_LOCK_KEY, {
+            owner: syncTab, until: Date.now() + SYNC_LOCK_MS, page: location.href, status: syncStatus,
+        });
         return true;
     }
 
     function releaseSyncLock() {
         const lock = GM_getValue(SYNC_LOCK_KEY, null);
         if (lock && lock.owner === syncTab) GM_setValue(SYNC_LOCK_KEY, null);
+    }
+
+    // Which tab holds the sync lock, and what it's doing
+    function otherSyncTab() {
+        const lock = GM_getValue(SYNC_LOCK_KEY, null) || {};
+        if (!lock.page) return "Another tab is already syncing"; // one with an older version of this script
+        const url = new URL(lock.page);
+        return `Already syncing in the tab on ${url.host}${url.pathname} (its title starts with ${SYNC_TITLE_MARK.trim()})`
+            + (lock.status ? `: ${lock.status}` : "");
+    }
+
+    function markSyncTab(on) {
+        const marked = document.title.startsWith(SYNC_TITLE_MARK);
+        if (on && !marked) document.title = SYNC_TITLE_MARK + document.title;
+        if (!on && marked) document.title = document.title.slice(SYNC_TITLE_MARK.length);
     }
 
     // Reads the user's newest posts until SYNC_STOP_AFTER_KNOWN downloaded ones in a row, and sends the new ones.

@@ -118,6 +118,38 @@ test("another tab is syncing: this one doesn't", async ({ context }) => {
     expect(harness.requestsTo("GET", `${SERVER}/watchlist`)).toEqual([]);
 });
 
+test("another tab is syncing: Sync says which tab and how far it got", async ({ context }) => {
+    await setUp(context, {
+        "bdfr-sync-lock": {
+            owner: "other-tab", until: Date.now() + 10 * 60 * 1000,
+            page: "https://old.reddit.com/r/pics/?count=25", status: "Syncing u/someone (2/5)…",
+        },
+    });
+    watch("someone");
+    const page = await harness.open();
+    await page.getByRole("button", { name: "Sync", exact: true }).click();
+    await expect(page.getByText(
+        "Already syncing in the tab on old.reddit.com/r/pics/ (its title starts with ⟳): Syncing u/someone (2/5)…",
+    )).toBeVisible();
+    expect(harness.requestsTo("GET", `${SERVER}/watchlist`)).toEqual([]);
+});
+
+test("the syncing tab's title is marked and its lock says where and how far, until it's done", async ({ context }) => {
+    await setUp(context, { "bdfr-sync": { first: { lastSuccess: Date.now() - HOUR } } });
+    watch("first");
+    nothingNewOnReddit("first", 1500);
+    harness.serve("POST", "/known", (request) => ({ json: { known: request.data.ids, known_by_link: [], duplicates: [], supported: true } }));
+    const page = await harness.open();
+    await syncFinished(page);
+    await page.getByRole("button", { name: "Sync", exact: true }).click();
+    await expect(page).toHaveTitle("⟳ overview for someone");
+    const lock = await page.evaluate(() => GM_getValue("bdfr-sync-lock", null));
+    expect(lock.page).toBe("https://old.reddit.com/user/someone/submitted/?sort=new");
+    expect(lock.status).toBe("Syncing u/first (1/1)…");
+    await syncFinished(page);
+    await expect(page).toHaveTitle("overview for someone");
+});
+
 test("two tabs opened together sync once", async ({ context }) => {
     await setUp(context);
     watch("someone");
