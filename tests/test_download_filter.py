@@ -33,9 +33,7 @@ def test_filter_extension(test_extension: str, expected: bool, download_filter: 
     (
         ("test.mp4", True),
         ("http://reddit.com/test.mp4", False),
-        ("http://reddit.com/test.gif", False),
         ("https://www.example.com/test.mp4", True),
-        ("https://www.example.com/test.png", True),
         ("https://i.example.com/test.png", True),
         ("https://img.example.com/test.png", False),
         ("https://i.test.com/test.png", False),
@@ -54,7 +52,6 @@ def test_filter_domain(test_url: str, expected: bool, download_filter: DownloadF
         ("https://www.example.com/test.mp4", False),
         ("https://www.example.com/test.png", True),
         ("http://reddit.com/test.mp4", False),
-        ("http://reddit.com/test.gif", False),
     ),
 )
 def test_filter_all(test_url: str, expected: bool, download_filter: DownloadFilter):

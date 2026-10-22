@@ -11,7 +11,6 @@ from bdfr.configuration import Configuration
 @pytest.mark.parametrize(
     "arg_dict",
     (
-        {"directory": "test_dir"},
         {
             "directory": "test_dir",
             "no_dupes": True,

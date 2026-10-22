@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import hashlib
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -70,6 +71,14 @@ def test_excluded_ids(
     assert mock_function.call_count == expected_len
 
 
-def test_search_existing_files():
-    hashes, _, _ = Downloader.scan_existing_files(Path(), False)
-    assert len(hashes) != 0
+def test_search_existing_files(tmp_path: Path):
+    (tmp_path / "abc123_one.jpg").write_bytes(b"one")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "def456_two.jpg").write_bytes(b"two")
+    (tmp_path / "hashes.sqlite").write_bytes(b"not a download")
+    hashes, _, _ = Downloader.scan_existing_files(tmp_path, False)
+    # Every download, in subfolders too, by its MD5; the hash store itself isn't a download
+    assert hashes == {
+        hashlib.md5(b"one").hexdigest(): tmp_path / "abc123_one.jpg",
+        hashlib.md5(b"two").hexdigest(): tmp_path / "sub" / "def456_two.jpg",
+    }

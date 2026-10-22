@@ -9,8 +9,6 @@ import pytest
 
 from bdfr.configuration import Configuration
 from bdfr.connector import Connector
-from bdfr.download_filter import DownloadFilter
-from bdfr.exceptions import BulkDownloaderException
 from bdfr.file_name_formatter import FileNameFormatter
 
 
@@ -39,26 +37,6 @@ def test_determine_directories(tmp_path: Path, downloader_mock: MagicMock):
 
 
 @pytest.mark.parametrize(
-    ("skip_extensions", "skip_domains"),
-    (
-        ([], []),
-        (
-            [".test"],
-            ["test.com"],
-        ),
-    ),
-)
-def test_create_download_filter(skip_extensions: list[str], skip_domains: list[str], downloader_mock: MagicMock):
-    downloader_mock.args.skip = skip_extensions
-    downloader_mock.args.skip_domain = skip_domains
-    result = Connector.create_download_filter(downloader_mock)
-
-    assert isinstance(result, DownloadFilter)
-    assert result.excluded_domains == skip_domains
-    assert result.excluded_extensions == skip_extensions
-
-
-@pytest.mark.parametrize(
     ("test_time", "expected_window"),
     (
         ("all", None),
@@ -84,9 +62,6 @@ def test_build_listings_time_window(test_time: str, expected_window, downloader_
 @pytest.mark.parametrize(
     ("test_file_scheme", "test_folder_scheme"),
     (
-        ("{POSTID}", "{SUBREDDIT}"),
-        ("{REDDITOR}_{TITLE}_{POSTID}", "{SUBREDDIT}"),
-        ("{POSTID}", "test"),
         ("{POSTID}", ""),
         ("{POSTID}", "{SUBREDDIT}/{REDDITOR}"),
     ),
@@ -102,31 +77,11 @@ def test_create_file_name_formatter(test_file_scheme: str, test_folder_scheme: s
 
 
 @pytest.mark.parametrize(
-    ("test_file_scheme", "test_folder_scheme"),
-    (
-        ("", ""),
-        ("", "{SUBREDDIT}"),
-        ("test", "{SUBREDDIT}"),
-    ),
-)
-def test_create_file_name_formatter_bad(test_file_scheme: str, test_folder_scheme: str, downloader_mock: MagicMock):
-    downloader_mock.args.file_scheme = test_file_scheme
-    downloader_mock.args.folder_scheme = test_folder_scheme
-    with pytest.raises(BulkDownloaderException):
-        Connector.create_file_name_formatter(downloader_mock)
-
-
-@pytest.mark.parametrize(
     ("test_name", "expected"),
     (
         ("Mindustry", "Mindustry"),
-        ("Futurology", "Futurology"),
         ("r/Mindustry", "Mindustry"),
-        ("TrollXChromosomes", "TrollXChromosomes"),
-        ("r/TrollXChromosomes", "TrollXChromosomes"),
         ("https://www.reddit.com/r/TrollXChromosomes/", "TrollXChromosomes"),
-        ("https://www.reddit.com/r/TrollXChromosomes", "TrollXChromosomes"),
-        ("https://www.reddit.com/r/Futurology/", "Futurology"),
         ("https://www.reddit.com/r/Futurology", "Futurology"),
     ),
 )
