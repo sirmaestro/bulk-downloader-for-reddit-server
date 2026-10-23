@@ -47,6 +47,22 @@ test.afterEach(async () => {
     expect(harness.logs.filter((log) => log.type === "pageerror")).toEqual([]);
 });
 
+test("doesn't send posts bdfr serve can't download", async ({ context }) => {
+    await setUp(context);
+    watch("someone");
+    someoneOnReddit();
+    harness.serve("POST", "/known", (request) => ({
+        json: {
+            known: request.data.ids.filter((id) => id.startsWith("kno")), known_by_link: [], duplicates: [],
+            unavailable: request.data.ids.filter((id) => id === "new0002"), supported: true,
+        },
+    }));
+    const page = await harness.open("/");
+    await expect.poll(() => jobsFor("someone folder").length, { timeout: 10000 }).toBe(1);
+    await syncFinished(page);
+    expect(jobsFor("someone folder")[0].posts.map((post) => post.id)).toEqual(["new0001", "gal0002"]);
+});
+
 test("sends a watched user's new media posts, from any page, stopping at 5 known posts in a row", async ({ context }) => {
     await setUp(context);
     watch("someone");

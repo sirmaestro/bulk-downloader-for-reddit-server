@@ -34,6 +34,7 @@ def downloader_mock(args: Configuration):
     downloader_mock.master_hash_list = {}
     downloader_mock._post_link_known.return_value = False
     downloader_mock._post_id_known.return_value = False
+    downloader_mock._post_unavailable.return_value = False
     return downloader_mock
 
 

@@ -6,7 +6,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from bdfr.configuration import Configuration
+from bdfr.exceptions import ContentGone, NotADownloadableLinkError, SiteDownloaderError
+from bdfr.post import Post
 from bdfr.site_downloaders.vreddit import VReddit
+from bdfr.site_downloaders.youtube import Youtube
 
 
 @pytest.mark.parametrize(
@@ -36,3 +39,24 @@ def test_find_video_url(post_data: dict, expected: str):
     for key, value in post_data.items():
         setattr(post, key, value)
     assert VReddit(post, Configuration())._find_video_url() == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "message", "gone"),
+    (
+        ("https://v.redd.it/i0waudehxe3h1", "HTTP Error 403: Forbidden (caused by <HTTPError 403: Forbidden>)", True),
+        ("https://v.redd.it/i0waudehxe3h1", "HTTP Error 404: Not Found", True),
+        # Other failures, and 403s from elsewhere, may pass: tried again later
+        ("https://v.redd.it/i0waudehxe3h1", "HTTP Error 500: Internal Server Error", False),
+        ("https://v.redd.it/i0waudehxe3h1", "Unable to download webpage: timed out", False),
+    ),
+)
+def test_deleted_video_is_gone(url: str, message: str, gone: bool, monkeypatch: pytest.MonkeyPatch):
+    def fail(video_url):
+        raise NotADownloadableLinkError(f"Video info extraction failed for {video_url}: {message}")
+
+    monkeypatch.setattr(Youtube, "get_video_data", staticmethod(fail))
+    post = Post({"id": "1tnwp48", "url": url})
+    with pytest.raises(SiteDownloaderError) as raised:
+        VReddit(post, Configuration()).find_resources()
+    assert isinstance(raised.value, ContentGone) is gone

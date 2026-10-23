@@ -19,14 +19,23 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import resources
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import parse_qs, urlsplit
 
 import platformdirs
 
 from bdfr import __version__, logs
 from bdfr.configuration import Configuration
-from bdfr.downloader import Downloader, duplicate_post_key, incomplete_post_key, post_ids_in_names, post_link
+from bdfr.downloader import (
+    Downloader,
+    duplicate_post_key,
+    incomplete_post_key,
+    post_ids_in_names,
+    post_link,
+    unavailable_post_key,
+)
 from bdfr.hash_store import HashStore
 
 logger = logging.getLogger(__name__)
@@ -42,7 +51,26 @@ FOLDER_PATTERN = re.compile(r"[\w\-. ]{1,100}")
 USER_PATTERN = re.compile(r"[\w-]{1,30}")
 POST_ID_PATTERN = re.compile(r"[a-z0-9]{3,13}")  # also keeps gallery indexes (_1, _2) from matching
 RESULT_LABELS = {True: "existing", False: "new", None: "skipped"}
-LABELS = ("new", "existing", "duplicate", "skipped", "failed")
+LABELS = ("new", "existing", "duplicate", "skipped", "failed", "unavailable")
+# GET /log: the most lines returned, and the most of the file's end read to find them
+MAX_LOG_LINES = 2000
+MAX_LOG_READ_BYTES = 4 * 1024 * 1024
+# A serve_log.txt line (bdfr/logs.py's FORMAT): time, level, then "job <id>, post <id>: " when either is set
+LOG_LINE = re.compile(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (\w+) +(?:(?:job (\w+))?(?:, )?(?:post (\w+))?: (?=\S))?(.*)")
+# The dashboard's files (bdfr/dashboard/), served without the token since they hold no data: the page asks for the
+# token and sends it with its own requests
+DASHBOARD_FILES = {
+    "/": ("dashboard.html", "text/html; charset=utf-8"),
+    "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
+    "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
+}
+DASHBOARD_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+    "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-cache",
+}
 
 
 class Job:
@@ -56,6 +84,7 @@ class Job:
         before: Optional[int] = None,
         after: Optional[int] = None,
         retry: bool = False,
+        scheduled: bool = False,
     ):
         self.id = job_id
         self.folder = folder
@@ -71,6 +100,8 @@ class Job:
         self.after = after
         # Posts from the failed-post retry list (bdfr/retries.py), downloaded without archive lookups
         self.retry = retry
+        # Queued by serve itself (the watchlist's archive checks, retries), so it waits behind the userscript's jobs
+        self.scheduled = scheduled
         # Called with the job once it has finished, whatever the outcome (used by the scheduler)
         self.on_finish: Optional[Callable[["Job"], None]] = None
         self.state = "queued"
@@ -80,6 +111,7 @@ class Job:
         # When the newest post the job went through was posted (used by the scheduler to notice quiet users)
         self.newest_post: Optional[float] = None
         self.created = time.time()
+        self.started: Optional[float] = None
         self.finished: Optional[float] = None
         self._lock = threading.Lock()
 
@@ -93,7 +125,9 @@ class Job:
         """The job without its per-post results, for GET /jobs"""
         details = self.to_dict()
         del details["results"]
-        details.update(user=self.user, created=self.created, finished=self.finished)
+        details.update(
+            user=self.user, scheduled=self.scheduled, created=self.created, started=self.started, finished=self.finished
+        )
         return details
 
     def to_dict(self) -> dict:
@@ -124,6 +158,9 @@ class DownloadServer:
         self.retries = None
         # Where problems are sent (bdfr/notifier.py), with --notify
         self.notifier = None
+        # serve_log.txt, which GET /log reads, when serve logs to a file
+        self.log_path: Optional[Path] = None
+        self.started = time.time()
         # (priority, order, job): the userscript's jobs (0) run before the scheduler's (1), each in arrival order
         self._queue: "queue.PriorityQueue[tuple[int, int, Job]]" = queue.PriorityQueue()
         self._order = itertools.count()
@@ -169,10 +206,14 @@ class DownloadServer:
             candidates = {i: url for i, url in links.items() if i in wanted and i not in found and isinstance(url, str)}
             by_link = self._known_links(self.root / folder, candidates)
         known = [i for i in ids if i in found or i in by_link]
+        # Posts that can't be downloaded (media gone for good, or no downloader for the link)
+        rest = wanted - found - duplicates - by_link
+        unavailable = self._stored_keys(self.root / folder, {unavailable_post_key(i): i for i in rest})
         return {
             "known": known,
             "known_by_link": [i for i in ids if i in by_link],
             "duplicates": [i for i in ids if i in duplicates and i not in by_link],
+            "unavailable": [i for i in ids if i in unavailable],
             "supported": supported,
         }
 
@@ -189,6 +230,31 @@ class DownloadServer:
     def _stored_keys(directory: Path, keys: dict[str, str]) -> set[str]:
         """The values of keys (URL-table key -> post ID) whose key is in the folder's hash store"""
         return {keys[key] for key in DownloadServer._stored_urls(directory, list(keys))}
+
+    @staticmethod
+    def removed_galleries(directory: Path) -> list[str]:
+        """IDs of the folder's removed galleries whose post data had no image list (see unavailable_post_key, kind
+        "nodata"), which the archive may have"""
+        prefix = unavailable_post_key("")
+        db_path = directory / "hashes.sqlite"
+        json_path = directory / "hash_url_list.json"
+        try:
+            if db_path.exists():
+                connection = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=5)
+                try:
+                    query = "SELECT url FROM hashes_url WHERE url LIKE ? AND hash LIKE 'nodata:%'"
+                    keys = [row[0] for row in connection.execute(query, (prefix + "%",))]
+                finally:
+                    connection.close()
+            elif json_path.exists():
+                stored = json.loads(json_path.read_text(encoding="utf-8"))
+                keys = [key for key, value in stored.items() if key.startswith(prefix) and value.startswith("nodata:")]
+            else:
+                return []
+        except (sqlite3.Error, OSError, ValueError, AttributeError) as e:
+            logger.warning(f"Could not read removed galleries in {directory}: {e}")
+            return []
+        return sorted(key[len(prefix) :] for key in keys)
 
     @staticmethod
     def _stored_urls(directory: Path, urls: list[str]) -> set[str]:
@@ -242,10 +308,12 @@ class DownloadServer:
                 raise ValueError(f"'{name}' must be a time in seconds since 1970")
         if after is not None and user is None:
             raise ValueError("'after' needs a 'user'")
-        job = Job(secrets.token_hex(6), folder, posts, user, payload.get("archive") == "all", before, after, retry)
+        full = payload.get("archive") == "all"
+        job = Job(secrets.token_hex(6), folder, posts, user, full, before, after, retry, scheduled)
         job.on_finish = on_finish
-        if posts and self.scheduler is not None and not retry:
-            # Posts read from Reddit by the userscript wake hibernating watched users
+        if posts and self.scheduler is not None and not retry and not scheduled:
+            # Posts read from Reddit by the userscript wake hibernating watched users (the scheduler's own jobs, queued
+            # while it holds its lock, have no such posts)
             self.scheduler.note_posts(posts)
         with self._lock:
             self.jobs[job.id] = job
@@ -286,13 +354,111 @@ class DownloadServer:
         return {"jobs": [job.summary() for job in jobs]}
 
     def status(self) -> dict:
+        with self._lock:
+            scheduled = sum(job.state == "queued" and job.scheduled for job in self.jobs.values())
         return {
             "version": __version__,
             "root": str(self.root),
             "running": self.current.id if self.current else None,
             "queued": self._queue.qsize(),
+            # Of the queued jobs, those serve queued itself (archive checks, retries)
+            "scheduled": scheduled,
             "retries": self.retries.snapshot() if self.retries else None,
+            "started": self.started,
+            "notify": self.notifier is not None,
+            "log": str(self.log_path) if self.log_path else None,
         }
+
+    def retry_list(self) -> dict:
+        """GET /retries: every post on the retry list"""
+        return {"posts": self.retries.listing() if self.retries else [], "enabled": self.retries is not None}
+
+    def log_tail(self, lines: int) -> dict:
+        """GET /log: the last lines of serve_log.txt as entries (time, level, job, post, message; a traceback's lines
+        are part of its entry's message), oldest first"""
+        lines = max(1, min(lines, MAX_LOG_LINES))
+        if self.log_path is None:
+            return {"path": None, "entries": []}
+        try:
+            with open(self.log_path, "rb") as file:
+                end = file.seek(0, os.SEEK_END)
+                start, data = end, b""
+                while start > 0 and data.count(b"\n") <= lines and end - start < MAX_LOG_READ_BYTES:
+                    start = max(0, start - 64 * 1024)
+                    file.seek(start)
+                    data = file.read(end - start)
+        except OSError as e:
+            return {"path": str(self.log_path), "entries": [], "error": str(e)}
+        entries: list[dict] = []
+        for line in data.decode("utf-8", errors="replace").splitlines():
+            if match := LOG_LINE.fullmatch(line):
+                when, level, job, post, message = match.groups()
+                entries.append({"time": when, "level": level, "job": job, "post": post, "message": message})
+            elif entries:
+                entries[-1]["message"] += "\n" + line
+            elif start == 0:
+                entries.append({"time": None, "level": None, "job": None, "post": None, "message": line})
+            # Otherwise the end of an entry that started before what was read
+        return {"path": str(self.log_path), "entries": entries[-lines:]}
+
+    def folders(self) -> dict:
+        """GET /folders: each folder under the root with what its hash store holds (files hashed, links stored, posts
+        recorded as duplicates, unavailable or incomplete) and its posts on the retry list. Reads every folder's store,
+        so the dashboard only asks for it when shown."""
+        retries: dict[str, int] = {}
+        for entry in self.retries.listing() if self.retries else ():
+            retries[entry["folder"].lower()] = retries.get(entry["folder"].lower(), 0) + 1
+        try:
+            directories = sorted(
+                (entry for entry in os.scandir(self.root) if entry.is_dir() and not entry.name.startswith(".")),
+                key=lambda entry: entry.name.lower(),
+            )
+        except OSError as e:
+            return {"folders": [], "error": str(e)}
+        folders = []
+        for directory in directories:
+            details = {"name": directory.name, "retries": retries.get(directory.name.lower(), 0)}
+            details.update(self._store_counts(Path(directory.path)))
+            folders.append(details)
+        return {"folders": folders}
+
+    @staticmethod
+    def _store_counts(directory: Path) -> dict:
+        """What a folder's hash store holds, read without writing (a job may be using it)"""
+        kinds = {
+            "duplicates": duplicate_post_key(""),
+            "unavailable": unavailable_post_key(""),
+            "incomplete": incomplete_post_key(""),
+        }
+        db_path = directory / "hashes.sqlite"
+        json_path = directory / "hash_url_list.json"
+        try:
+            if db_path.exists():
+                connection = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=5)
+                try:
+                    files = connection.execute("SELECT COUNT(*) FROM hashes").fetchone()[0]
+                    counts = {"store": "sqlite", "files": files}
+                    total = connection.execute("SELECT COUNT(*) FROM hashes_url").fetchone()[0]
+                    for name, prefix in kinds.items():
+                        # A range on the primary key, which LIKE wouldn't use
+                        query = "SELECT COUNT(*) FROM hashes_url WHERE url >= ? AND url < ?"
+                        counts[name] = connection.execute(query, (prefix, prefix[:-1] + ";")).fetchone()[0]
+                finally:
+                    connection.close()
+            elif json_path.exists():
+                stored = json.loads(json_path.read_text(encoding="utf-8"))
+                hashes_path = directory / "hash_list.json"
+                hashes = json.loads(hashes_path.read_text(encoding="utf-8")) if hashes_path.exists() else {}
+                counts = {"store": "json", "files": len(hashes)}
+                total = len(stored)
+                for name, prefix in kinds.items():
+                    counts[name] = sum(1 for key in stored if key.startswith(prefix))
+            else:
+                return {"store": None}
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"store": "error", "error": str(e)}
+        counts["links"] = total - sum(counts[name] for name in kinds)
+        return counts
 
     def _worker(self):
         while True:
@@ -341,7 +507,7 @@ class DownloadServer:
             args.listing_after = job.after
 
         job.state = "running"
-        started = time.time()
+        started = job.started = time.time()
         logger.info(f"Started: {self._describe(job)}")
         logger.debug(f"Options: {self._options(args)}")
         # The outcome is published once the job is cleaned up, so whoever sees it finished sees it complete
@@ -463,15 +629,39 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
             self._send(401, {"error": "Missing or wrong X-BDFR-Token"})
             return False
 
+        def _send_dashboard(self, name: str, content_type: str):
+            data = resources.files("bdfr").joinpath("dashboard", name).read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            for header, value in DASHBOARD_HEADERS.items():
+                self.send_header(header, value)
+            self.end_headers()
+            self.wfile.write(data)
+
         def do_GET(self):
+            if self.path in DASHBOARD_FILES:
+                self._send_dashboard(*DASHBOARD_FILES[self.path])
+                return
             if not self._authorised():
                 return
+            url = urlsplit(self.path)
             if self.path == "/status":
                 self._send(200, server.status())
             elif self.path == "/watchlist":
                 self._send(200, server.watchlist())
             elif self.path == "/jobs":
                 self._send(200, server.recent_jobs())
+            elif self.path == "/retries":
+                self._send(200, server.retry_list())
+            elif self.path == "/folders":
+                self._send(200, server.folders())
+            elif url.path == "/log":
+                lines = parse_qs(url.query).get("lines", ["500"])[0]
+                if not lines.isdigit():
+                    self._send(400, {"error": "'lines' must be a number"})
+                    return
+                self._send(200, server.log_tail(int(lines)))
             elif match := re.fullmatch(r"/jobs/(\w+)", self.path):
                 job = server.jobs.get(match.group(1))
                 self._send(200, job.to_dict()) if job else self._send(404, {"error": "No such job"})
@@ -535,6 +725,7 @@ def run_server(base_args: Configuration, port: int):
     token = load_token(config_directory)
     log_file = _log_to_file(base_args, config_directory)
     server = DownloadServer(base_args, root, token)
+    server.log_path = Path(log_file.baseFilename)
     if base_args.notify:
         from bdfr.notifier import Notifier
 
@@ -553,6 +744,7 @@ def run_server(base_args: Configuration, port: int):
     host = base_args.host or "127.0.0.1"
     httpd = ThreadingHTTPServer((host, port), make_handler(server))
     logger.info(f"Listening on http://{host}:{port}, downloading into folders under {root}")
+    logger.info(f"Dashboard (needs the token): http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}/")
     if host not in ("127.0.0.1", "localhost", "::1"):
         logger.warning(
             f"Listening on {host}: other machines on the network can reach the server. Every request needs the token, "

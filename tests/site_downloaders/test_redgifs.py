@@ -97,6 +97,8 @@ def test_url_is_accessible_asks_for_one_byte(
 )
 def test_get_link_images(gif: dict, gallery, expected: set[str], monkeypatch: pytest.MonkeyPatch):
     def retrieve_url(url, headers=None):
+        # Every API request carries the token, galleries' too
+        assert headers and headers["Authorization"] == "Bearer token"
         if url == "https://api.redgifs.com/v2/gallery/g1":
             return Mock(text=json.dumps(gallery))
         return Mock(text=json.dumps({"gif": gif}))

@@ -114,7 +114,7 @@ def test_posts_job(server, tmp_path: Path):
     job = wait_for(base, job["id"])
     assert job["state"] == "done"
     assert job["results"] == {"a": "new", "b": "existing", "c": "skipped"}
-    assert job["counts"] == {"existing": 1, "new": 1, "duplicate": 0, "skipped": 1, "failed": 0}
+    assert job["counts"] == {"existing": 1, "new": 1, "duplicate": 0, "skipped": 1, "failed": 0, "unavailable": 0}
     args, post_ids = FakeDownloader.runs[0]
     assert post_ids == ["a", "b", "c"]
     assert Path(args.directory) == tmp_path / "some user"
@@ -241,7 +241,13 @@ def test_known_posts_from_file_names(server, tmp_path: Path):
         base, "POST", "/known", {"folder": "someone", "ids": ["abc123", "def456", "ghi789", "zzz999", "2", "title"]}
     )
     assert status == 200
-    assert result == {"known": ["abc123", "def456", "ghi789"], "known_by_link": [], "duplicates": [], "supported": True}
+    assert result == {
+        "known": ["abc123", "def456", "ghi789"],
+        "known_by_link": [],
+        "duplicates": [],
+        "unavailable": [],
+        "supported": True,
+    }
     assert call(base, "POST", "/known", {"folder": "missing", "ids": ["abc123"]})[1]["known"] == []
     assert call(base, "POST", "/known", {"folder": "../x", "ids": []})[0] == 400
 
@@ -250,7 +256,7 @@ def test_known_posts_needs_post_id_scheme(server):
     download_server, base = server
     download_server.base_args.file_scheme = "{REDDITOR}_{TITLE}"
     result = call(base, "POST", "/known", {"folder": "someone", "ids": ["abc123"]})[1]
-    assert result == {"known": [], "known_by_link": [], "duplicates": [], "supported": False}
+    assert result == {"known": [], "known_by_link": [], "duplicates": [], "unavailable": [], "supported": False}
 
 
 def test_duplicates_are_counted_apart_from_skips():
@@ -433,6 +439,33 @@ def test_recent_jobs(server):
     assert body["jobs"][1]["counts"]["new"] == 1
 
 
+def test_status_counts_scheduled_jobs(server, monkeypatch: pytest.MonkeyPatch):
+    download_server, base = server
+    started, release = threading.Event(), threading.Event()
+    original = FakeDownloader.download
+
+    def blocked(self):
+        started.set()
+        release.wait(5)
+        original(self)
+
+    monkeypatch.setattr(FakeDownloader, "download", blocked)
+    running = download_server.submit({"folder": "one", "posts": [{"id": "a"}]})
+    assert started.wait(5)
+    scheduled = download_server.submit({"folder": "two", "user": "someone"}, scheduled=True)
+    download_server.submit({"folder": "three", "posts": [{"id": "b"}]})
+    try:
+        _, status = call(base, "GET", "/status")
+        assert status["running"] == running.id and status["queued"] == 2 and status["scheduled"] == 1
+        jobs = {job["id"]: job for job in call(base, "GET", "/jobs")[1]["jobs"]}
+        assert jobs[scheduled.id]["scheduled"] is True and jobs[scheduled.id]["started"] is None
+        assert jobs[running.id]["scheduled"] is False and jobs[running.id]["started"] >= jobs[running.id]["created"]
+    finally:
+        release.set()
+    assert wait_for(base, scheduled.id)["state"] == "done"
+    assert call(base, "GET", "/status")[1]["scheduled"] == 0
+
+
 def test_failed_jobs_are_notified(server, monkeypatch: pytest.MonkeyPatch):
     download_server, base = server
     download_server.notifier = MagicMock()
@@ -460,3 +493,153 @@ def test_notify_option(tmp_path: Path, arguments: list, environment: dict):
     with patch("bdfr.__main__.run_server", lambda config, port: captured.update(config=config)):
         CliRunner(env=environment).invoke(cli, ["serve", str(tmp_path), *arguments])
     assert captured["config"].notify == "https://ntfy.example/bdfr"
+
+
+def test_dashboard_needs_no_token(server):
+    _, base = server
+    for path, kind in (("/", "text/html"), ("/dashboard.js", "text/javascript"), ("/dashboard.css", "text/css")):
+        with urllib.request.urlopen(base + path, timeout=10) as response:
+            assert response.status == 200 and response.headers["Content-Type"].startswith(kind)
+            assert "script-src 'self'" in response.headers["Content-Security-Policy"]
+            assert response.read()
+    # Only the page's own files: the data still needs the token
+    for path in ("/status", "/log", "/retries", "/folders", "/dashboard.html", "/../server.py"):
+        assert call(base, "GET", path, token="")[0] == 401
+
+
+def test_status_for_the_dashboard(server):
+    download_server, base = server
+    _, status = call(base, "GET", "/status")
+    assert status["started"] == download_server.started and status["notify"] is False and status["log"] is None
+    download_server.notifier = MagicMock()
+    assert call(base, "GET", "/status")[1]["notify"] is True
+
+
+def test_log_tail(server, tmp_path: Path):
+    download_server, base = server
+    assert call(base, "GET", "/log")[1] == {"path": None, "entries": []}
+    log_path = tmp_path / "serve_log.txt"
+    lines = [f"2026-10-21 09:00:{i % 60:02d} INFO    Line {i}" for i in range(3000)]
+    lines += [
+        "2026-10-21 09:09:15 WARNING job 3fd9e1485ded, post 1xbgyxi: failed - HTTP 500: x",
+        "Traceback (most recent call last):",
+        '  File "x.py", line 1',
+        "2026-10-21 09:09:16 DEBUG   job 3fd9e1485ded: Options: --parallel 4",
+        "2026-10-21 09:09:17 INFO    post abc123: new - 1 file written",
+        "2026-10-21 09:09:18 INFO    Listening on http://127.0.0.1:7635",
+    ]
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    download_server.log_path = log_path
+    status, body = call(base, "GET", "/log?lines=4")
+    assert status == 200 and body["path"] == str(log_path)
+    assert body["entries"] == [
+        {
+            "time": "2026-10-21 09:09:15",
+            "level": "WARNING",
+            "job": "3fd9e1485ded",
+            "post": "1xbgyxi",
+            "message": 'failed - HTTP 500: x\nTraceback (most recent call last):\n  File "x.py", line 1',
+        },
+        {
+            "time": "2026-10-21 09:09:16",
+            "level": "DEBUG",
+            "job": "3fd9e1485ded",
+            "post": None,
+            "message": "Options: --parallel 4",
+        },
+        {
+            "time": "2026-10-21 09:09:17",
+            "level": "INFO",
+            "job": None,
+            "post": "abc123",
+            "message": "new - 1 file written",
+        },
+        {
+            "time": "2026-10-21 09:09:18",
+            "level": "INFO",
+            "job": None,
+            "post": None,
+            "message": "Listening on http://127.0.0.1:7635",
+        },
+    ]
+    # At most MAX_LOG_LINES lines, and 500 without lines=
+    assert len(call(base, "GET", "/log?lines=99999")[1]["entries"]) <= 2000
+    assert len(call(base, "GET", "/log")[1]["entries"]) <= 500
+    assert call(base, "GET", "/log?lines=x")[0] == 400
+
+
+def test_retry_list_endpoint(server, tmp_path: Path):
+    from bdfr.retries import RetryList
+
+    download_server, base = server
+    assert call(base, "GET", "/retries")[1] == {"posts": [], "enabled": False}
+    download_server.retries = RetryList(download_server, tmp_path / "failed_posts.json", clock=lambda: 1000.0)
+    post = {"id": "abc123", "title": "A title", "url": "https://i.redd.it/x.jpg", "author": "someone", "score": 1}
+    download_server.retries.note_job("pics", {"abc123": "failed"}, {"abc123": (post, "HTTP 500")})
+    _, body = call(base, "GET", "/retries")
+    assert body["enabled"] is True
+    assert body["posts"] == [
+        {
+            "folder": "pics",
+            "id": "abc123",
+            "title": "A title",
+            "url": "https://i.redd.it/x.jpg",
+            "author": "someone",
+            "error": "HTTP 500",
+            "attempts": 1,
+            "failed": 1000.0,
+            "next_try": 1000.0 + 3600,
+            "pending": False,
+        }
+    ]
+
+
+def test_folders_endpoint(server, tmp_path: Path):
+    download_server, base = server
+    database = tmp_path / "sqlite_folder" / "hashes.sqlite"
+    database.parent.mkdir()
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE hashes (hash TEXT PRIMARY KEY, file_path TEXT NOT NULL)")
+    connection.execute("CREATE TABLE hashes_url (url TEXT PRIMARY KEY, hash TEXT NOT NULL)")
+    connection.executemany("INSERT INTO hashes VALUES (?, ?)", [("h1", "a.jpg"), ("h2", "b.jpg")])
+    urls = ["https://i.redd.it/a.jpg", "post:d1", "unavailable:u1", "unavailable:u2", "incomplete:i1"]
+    connection.executemany("INSERT INTO hashes_url VALUES (?, ?)", [(url, "h1") for url in urls])
+    connection.commit()
+    connection.close()
+    json_folder = tmp_path / "json_folder"
+    json_folder.mkdir()
+    (json_folder / "hash_list.json").write_text(json.dumps({"h1": "a.jpg"}), encoding="utf-8")
+    stored = {"https://x/a.jpg": "h1", "https://x/b.jpg": "h1", "unavailable:u1": "gone:404"}
+    (json_folder / "hash_url_list.json").write_text(json.dumps(stored), encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "hash_url_list.json").write_text("{", encoding="utf-8")
+    download_server.retries = MagicMock()
+    download_server.retries.listing.return_value = [{"folder": "Empty"}, {"folder": "empty"}]
+    status, body = call(base, "GET", "/folders")
+    assert status == 200
+    folders = {folder["name"]: folder for folder in body["folders"]}
+    assert list(folders) == ["broken", "empty", "json_folder", "sqlite_folder"]
+    assert folders["sqlite_folder"] == {
+        "name": "sqlite_folder",
+        "retries": 0,
+        "store": "sqlite",
+        "files": 2,
+        "links": 1,
+        "duplicates": 1,
+        "unavailable": 2,
+        "incomplete": 1,
+    }
+    assert folders["json_folder"] == {
+        "name": "json_folder",
+        "retries": 0,
+        "store": "json",
+        "files": 1,
+        "links": 2,
+        "duplicates": 0,
+        "unavailable": 1,
+        "incomplete": 0,
+    }
+    assert folders["empty"] == {"name": "empty", "retries": 2, "store": None}
+    assert folders["broken"]["store"] == "error"

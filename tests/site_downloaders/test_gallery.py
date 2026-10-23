@@ -45,3 +45,10 @@ def test_find_image_tries_jpg_first(answers: dict, expected, tried: list[str], m
     monkeypatch.setattr(http_session(), "head", head)
     assert Gallery.find_image("abc") == expected
     assert asked == [f"https://i.redd.it/abc{extension}" for extension in tried]
+
+
+@pytest.mark.parametrize("status", (429, 500, 503))
+def test_find_image_does_not_take_other_answers_as_gone(status: int, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(http_session(), "head", lambda url, **kwargs: MagicMock(status_code=status))
+    with pytest.raises(SiteDownloaderError, match=f"HTTP {status}"):
+        Gallery.find_image("abc")

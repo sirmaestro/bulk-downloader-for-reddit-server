@@ -26,11 +26,18 @@ class BaselineScheduler:
     The userscript's background sync brings new posts from Reddit day to day, and by default that is all: the archive
     is only read for users with archive checks on (`archive: true` on the user, or `archive_checks: true` for every
     user without their own `archive`). For those, this fills the rest: their history, posts removed from Reddit
-    before the browser saw them, and days without a browser. The first check reads the user's whole archive (once;
-    `full_archive_done` in the state). After that, every `interval_days` a job reads the window since the previous
-    successful run, starting `overlap_days` earlier for posts the archive got late, to its end, so gaps between
-    downloaded posts are filled (downloaded posts cost no requests). One scheduled job is queued at a time, with a
-    pause between them. A failed run leaves the window where it was and is retried after `retry_hours`.
+    before the browser saw them, and days without a browser. A user without a baseline (no earlier window in the
+    state) first gets their whole archive read (once; `full_archive_done` in the state), and so does one with
+    `archive: all` until that's done. Otherwise, every `interval_days` a job reads the window since the previous
+    successful run (or the baseline), starting `overlap_days` earlier for posts the archive got late, to its end, so
+    gaps between downloaded posts are filled (downloaded posts cost no requests). One scheduled job is queued at a
+    time, with a pause between them. A failed run leaves the window where it was and is retried after `retry_hours`.
+
+    Removed galleries the folder knows of without their image list (Reddit drops it; see unavailable_post_key), and
+    failed galleries in the retry list without one, are looked up in the archive by ID (100 per request), at most
+    once every `retry_hours` per user, hibernating or not, so turning archive checks on for a user fetches them
+    without reading their whole archive. Ones the archive doesn't have, or has without an image list, are recorded as
+    gone and not looked up again.
 
     Users whose newest known post is more than `hibernate_days` old (stopped posting, banned, moved to another account)
     hibernate: their archive windows aren't read, and only the userscript's free weekly check of Reddit looks for new
@@ -57,7 +64,9 @@ class BaselineScheduler:
           - someone                 # downloads into the folder "someone"
           - name: someone_else
             folder: Some folder
-            archive: true           # read someone_else's whole archive once, then weekly windows
+            archive: true           # weekly windows of someone_else's archive (the whole archive first if never read)
+          - name: third
+            archive: all            # read third's whole archive once, even after earlier windows, then windows
           - name: new_account
             aliases: [old_account]  # old_account's posts are in the folder "new_account"; old_account isn't checked
     """
@@ -155,8 +164,13 @@ class BaselineScheduler:
                 continue
             seen.add(name.lower())
             archive = entry.get("archive")
-            if archive is not None and not isinstance(archive, bool):
-                logger.warning(f"Watchlist: u/{name}'s 'archive' must be true or false, not {archive!r}; ignoring it")
+            full = archive == "all"
+            if full:
+                archive = True
+            elif archive is not None and not isinstance(archive, bool):
+                logger.warning(
+                    f"Watchlist: u/{name}'s 'archive' must be true, false or all, not {archive!r}; ignoring it"
+                )
                 archive = None
             users.append(
                 {
@@ -164,6 +178,7 @@ class BaselineScheduler:
                     "folder": folder,
                     "archive": settings["archive_checks"] if archive is None else archive,
                     "archive_own": archive is True,  # asked for on the user itself: read even while hibernating
+                    "archive_full": full,  # archive: all: the whole archive once, even with a baseline
                 }
             )
             aliases = entry.get("aliases") or []
@@ -195,9 +210,19 @@ class BaselineScheduler:
             now = self.clock()
             if self._pending is not None or now - self._last_finished < self.PAUSE_SECONDS:
                 return
+            # Known removed galleries first: a few requests, before any listing is read
+            for user in self.users:
+                if self._lookups_due(user, self.state.get(user["name"].lower()), now):
+                    state = self.state.setdefault(user["name"].lower(), {})
+                    state["lookups_checked"] = now
+                    self._save_state()
+                    ids = self._lookup_ids(user)
+                    if ids:
+                        self._submit_lookups(user, ids)
+                        return
             for user in self.users:
                 state = self.state.get(user["name"].lower())
-                if self._checked(user, state, now) and self._due(state, now):
+                if self._checked(user, state, now) and self._due(user, state, now):
                     self._submit(user, now)
                     return
 
@@ -207,9 +232,65 @@ class BaselineScheduler:
             return False  # aliases, and users without archive checks: only the userscript's posts
         if (state or {}).get("gone"):
             return False  # suspended or deleted on Reddit
-        if not (state or {}).get("full_archive_done") and user.get("archive_own"):
+        if self._full_read_wanted(user, state) and user.get("archive_own"):
             return True
         return not self._hibernating(state, now)
+
+    @staticmethod
+    def _full_read_wanted(user: dict, state: Optional[dict]) -> bool:
+        """Whether the user's next check reads their whole archive: never read in full, and either without a baseline
+        (no window read before, e.g. a new user) or with `archive: all`"""
+        state = state or {}
+        if state.get("full_archive_done"):
+            return False
+        return not state.get("window_end") or bool(user.get("archive_full"))
+
+    def _lookups_due(self, user: dict, state: Optional[dict], now: float) -> bool:
+        """Whether to look for the user's removed galleries to look up by ID (see the class docstring)"""
+        state = state or {}
+        if not user["archive"] or "alias_of" in user or state.get("gone"):
+            return False
+        return now - (state.get("lookups_checked") or 0) >= self.settings["retry_hours"] * 3600
+
+    # Removed galleries looked up per job: 10 requests
+    MAX_LOOKUPS = 1000
+
+    def _lookup_ids(self, user: dict) -> list[str]:
+        ids = set(self.server.removed_galleries(self.server.root / user["folder"]))
+        if getattr(self.server, "retries", None) is not None:
+            ids.update(self.server.retries.galleries_without_data(user["folder"]))
+        return sorted(ids)[: self.MAX_LOOKUPS]
+
+    def _submit_lookups(self, user: dict, ids: list[str]):
+        """Queues a posts-only job looking the user's removed galleries up in the archive by ID"""
+        requests = -(-len(ids) // 100)
+        logger.info(
+            f"Looking up {len(ids)} removed galleries of u/{user['name']} in the archive by ID ({requests} "
+            f"request{'s' if requests != 1 else ''})"
+        )
+        self._pending = user["name"].lower()
+        try:
+            self.server.submit(
+                {"folder": user["folder"], "posts": [{"id": post_id} for post_id in ids]},
+                on_finish=lambda job: self._lookups_finished(user, job),
+                scheduled=True,
+            )
+        except ValueError as e:
+            self._pending = None
+            logger.warning(f"Could not queue the lookups for u/{user['name']}: {e}")
+
+    def _lookups_finished(self, user: dict, job):
+        with self._lock:
+            counts = ", ".join(f"{n} {label}" for label, n in job.counts.items() if n)
+            if job.state == "done":
+                logger.info(f"Lookups for u/{user['name']} done: {counts or 'nothing'}")
+            else:
+                logger.warning(
+                    f"Lookups for u/{user['name']} failed ({job.error or job.state}); tried again in "
+                    f"{self.settings['retry_hours']} hours"
+                )
+            self._pending = None
+            self._last_finished = self.clock()
 
     def _gone_hidden(self, state: Optional[dict], now: float) -> bool:
         """Whether a suspended or deleted user is left out of GET /watchlist: unless they posted within
@@ -228,17 +309,17 @@ class BaselineScheduler:
         newest = (state or {}).get("newest_post")
         return isinstance(newest, (int, float)) and now - newest > self.settings["hibernate_days"] * DAY
 
-    def _due(self, state: Optional[dict], now: float) -> bool:
-        next_check = self._next_check(state)
+    def _due(self, user: dict, state: Optional[dict], now: float) -> bool:
+        next_check = self._next_check(user, state)
         return next_check is None or now >= next_check
 
-    def _next_check(self, state: Optional[dict]) -> Optional[float]:
+    def _next_check(self, user: dict, state: Optional[dict]) -> Optional[float]:
         """When the user's next check is due; None: now"""
         if not state or not state.get("last_attempt"):
             return None
         if state.get("last_error"):
             return state["last_attempt"] + self.settings["retry_hours"] * 3600
-        if not state.get("full_archive_done"):
+        if self._full_read_wanted(user, state):
             return None
         return (state.get("last_success") or 0) + self.settings["interval_days"] * DAY
 
@@ -272,8 +353,9 @@ class BaselineScheduler:
                 if state is None and not any(user["name"].lower() == author.lower() for user in self.users):
                     continue
                 state = self.state.setdefault(author.lower(), {})
-                if state.get("gone"):
-                    # Read from Reddit just now, so the account is there after all
+                if state.get("gone") and created > (state.get("gone_checked") or 0):
+                    # Posted since the account was found gone, so it's there after all (older posts prove nothing:
+                    # they may come from anywhere, e.g. posts saved before the account went)
                     logger.info(f"u/{author} has posts on Reddit again; no longer {state['gone']}")
                     state.pop("gone", None)
                     state.pop("gone_checked", None)
@@ -320,7 +402,7 @@ class BaselineScheduler:
         key = user["name"].lower()
         state = self.state.setdefault(key, {})
         payload = {"folder": user["folder"], "user": user["name"]}
-        if state.get("full_archive_done") and state.get("window_end"):
+        if not self._full_read_wanted(user, state) and state.get("window_end"):
             payload["after"] = int(state["window_end"] - self.settings["overlap_days"] * DAY)
         else:
             payload["archive"] = "all"
@@ -398,7 +480,7 @@ class BaselineScheduler:
                         "last_success": state.get("last_success"),
                         "last_error": state.get("last_error"),
                         # None: due now, or not checked (no archive checks, hibernating, aliases)
-                        "next_check": self._next_check(state) if checked else None,
+                        "next_check": self._next_check(user, state) if checked else None,
                         "newest_post": state.get("newest_post"),
                         "hibernating": self._hibernating(state, now),
                         **({"alias_of": user["alias_of"]} if "alias_of" in user else {}),

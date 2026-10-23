@@ -8,7 +8,7 @@ import urllib.request
 
 from bdfr import __version__
 from bdfr.configuration import Configuration
-from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
+from bdfr.exceptions import ContentGone, ResourceNotFound, SiteDownloaderError
 from bdfr.post import Post
 from bdfr.resource import Resource
 from bdfr.site_downloaders.base_downloader import BaseDownloader
@@ -66,6 +66,9 @@ class Imgur(BaseDownloader):
 
         out = []
         if "is_album" in self.raw_data:
+            if not self.raw_data.get("images"):
+                # The API keeps an album whose images were all removed, with images null or empty
+                raise ContentGone("The Imgur album has no images any more")
             for image in self.raw_data["images"]:
                 if not self.args.imgur_originals and "mp4" in image:
                     out.append(Resource(self.post, image["mp4"], Resource.retry_download(image["mp4"], HEADERS)))
@@ -105,6 +108,8 @@ class Imgur(BaseDownloader):
         }
         try:
             res = Imgur.retrieve_url(link, headers=headers)
+        except ContentGone:
+            raise
         except ResourceNotFound as e:
             raise SiteDownloaderError(f"Could not retrieve data: {e}")
 

@@ -19,6 +19,7 @@ from bdfr.scheduler import BaselineScheduler
 from bdfr.server import DownloadServer, Job
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 from bdfr.site_downloaders.download_factory import DownloadFactory
+from bdfr.site_downloaders.gallery import Gallery
 from tests.mock_arctic_shift import MockArcticShift
 
 NOW = 1_790_000_000
@@ -151,9 +152,10 @@ def test_failed_lookup_of_given_posts_fails_the_job(serve: DownloadServer, archi
 
 
 def test_posts_for_users_without_archive_checks_are_not_looked_up(
-    serve: DownloadServer, archive: MockArcticShift, tmp_path: Path
+    serve: DownloadServer, archive: MockArcticShift, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A gallery Reddit dropped the image list of fails as removed instead of being looked up in the archive"""
+    """A gallery Reddit dropped the image list of is unavailable (removed) instead of being looked up in the archive,
+    and isn't tried again until it comes with its image list"""
     (tmp_path / "watchlist.yaml").write_text("users: [someone]\n", encoding="utf-8")
     serve.scheduler = BaselineScheduler(serve, tmp_path / "watchlist.yaml")
     serve.scheduler.tick()
@@ -162,8 +164,94 @@ def test_posts_for_users_without_archive_checks_are_not_looked_up(
     post.pop("gallery_data", None)
     job = run(serve, {"folder": "someone", "posts": [post]})
     assert job.state == "done"
-    assert job.results == {"abc0001": "failed"}
+    assert job.results == {"abc0001": "unavailable"}
     assert archive.requests == []
+    assert serve.known_posts({"folder": "someone", "ids": ["abc0001"]})["unavailable"] == ["abc0001"]
+    assert run(serve, {"folder": "someone", "posts": [post]}).results == {"abc0001": "unavailable"}
+    # Other data (e.g. the archive's) has the image list
+    monkeypatch.setattr(Gallery, "find_image", staticmethod(lambda media_id: f"{archive.base}/media/abc0001.jpg"))
+    post["gallery_data"] = {"items": [{"media_id": "m1"}]}
+    job = run(serve, {"folder": "someone", "posts": [post]})
+    assert job.results == {"abc0001": "new"}
+    assert serve.known_posts({"folder": "someone", "ids": ["abc0001"]})["unavailable"] == []
+
+
+def test_listing_stops_after_a_run_of_unavailable_posts(serve: DownloadServer, archive: MockArcticShift):
+    """A user who deleted their older posts: once their media has been gone for --stop-at-unavailable posts in a row,
+    the rest of the archive isn't read"""
+    serve.base_args.stop_at_unavailable = 3
+    archive.add_post("new0001", NOW)
+    for number in range(8):
+        archive.add_post(f"old000{number}", NOW - 100 - number)
+        del archive.media[f"old000{number}.jpg"]
+    job = run(serve, {"folder": "someone", "user": "someone", "archive": "all"})
+    assert job.state == "done"
+    assert job.results == {
+        "new0001": "new",
+        "old0000": "unavailable",
+        "old0001": "unavailable",
+        "old0002": "unavailable",
+    }
+    # Pages of 3: the third (old0005 and older) is never fetched
+    assert len(archive.endpoint_requests("posts/search")) == 2
+
+
+@pytest.mark.parametrize("store", ("db", "json"))
+def test_removed_galleries_looked_up_by_id(
+    serve: DownloadServer, archive: MockArcticShift, monkeypatch: pytest.MonkeyPatch, store: str
+):
+    """Removed galleries recorded without their image list are downloaded when the archive has it; ones the archive
+    has without it, or doesn't have, are recorded as gone and not looked up again"""
+    serve.base_args.keep_hashes_db = store == "db"
+    serve.base_args.keep_hashes = store == "json"
+    serve.base_args.archive_lookups = False
+    folder = serve.root / "someone"
+    posts = []
+    for post_id in ("has0001", "lacks01", "missing"):
+        archive.add_post(post_id, NOW, url=f"https://www.reddit.com/gallery/{post_id}")
+        posts.append(dict(archive.posts[post_id], removed_by_category="reddit"))
+    job = run(serve, {"folder": "someone", "posts": posts})  # as the userscript sends them, archive lookups off
+    assert set(job.results.values()) == {"unavailable"}
+    assert DownloadServer.removed_galleries(folder) == ["has0001", "lacks01", "missing"]
+
+    archive.posts["has0001"]["gallery_data"] = {"items": [{"media_id": "m1"}]}
+    del archive.posts["missing"]
+    monkeypatch.setattr(Gallery, "find_image", staticmethod(lambda media_id: f"{archive.base}/media/has0001.jpg"))
+    serve.base_args.archive_lookups = True
+    ids = [{"id": post_id} for post_id in DownloadServer.removed_galleries(folder)]
+    job = run(serve, {"folder": "someone", "posts": ids})
+    assert job.state == "done"
+    assert job.results == {"has0001": "new", "lacks01": "unavailable"}
+    assert len(archive.endpoint_requests("posts/ids")) == 1  # all three in one request
+    assert DownloadServer.removed_galleries(folder) == []
+    known = serve.known_posts({"folder": "someone", "ids": ["has0001", "lacks01", "missing"]})
+    assert known["known"] == ["has0001"] and known["unavailable"] == ["lacks01", "missing"]
+
+
+@pytest.mark.parametrize("store", ("db", "json"))
+def test_gallery_whose_files_were_all_downloaded_by_another_post_is_remembered(
+    serve: DownloadServer, archive: MockArcticShift, monkeypatch: pytest.MonkeyPatch, store: str
+):
+    """A gallery posted again (or by an old account) has nothing with its ID in the folder; once its files' links are
+    all found downloaded before, /known and later runs know it without asking the host"""
+    serve.base_args.keep_hashes_db = store == "db"
+    serve.base_args.keep_hashes = store == "json"
+    urls = [f"{archive.base}/media/abc0001.jpg", f"{archive.base}/media/abc0001_b.jpg"]
+    archive.media["abc0001_b.jpg"] = b"second image"
+
+    class TwoFiles(BaseDownloader):
+        def find_resources(self) -> list[Resource]:
+            return [Resource(self.post, url, Resource.retry_download(url)) for url in urls]
+
+    monkeypatch.setattr(DownloadFactory, "pull_lever", staticmethod(lambda url: TwoFiles))
+    first, again = archive.add_post("abc0001", NOW), archive.add_post("def0002", NOW + 10)
+    run(serve, {"folder": "someone", "posts": [first]})
+    job = run(serve, {"folder": "someone", "posts": [again]})
+    assert job.results == {"def0002": "existing"}
+    known = serve.known_posts({"folder": "someone", "ids": ["def0002"]})
+    assert known["known"] == [] and known["duplicates"] == ["def0002"]
+    archive.media.clear()  # known before any request
+    assert run(serve, {"folder": "someone", "posts": [again]}).results == {"def0002": "existing"}
 
 
 @pytest.mark.parametrize("store", ("db", "json"))
@@ -184,9 +272,14 @@ def test_post_failing_part_way_is_not_known_until_finished(
     monkeypatch.setattr(DownloadFactory, "pull_lever", staticmethod(lambda url: TwoFiles))
     known = {"folder": "someone", "ids": ["abc0001"]}
 
-    run(serve, {"folder": "someone", "posts": [post]})  # the mock has no second file yet: 404
+    serve.retries = RetryList(serve, serve.root / "failed_posts.json")
+    job = run(serve, {"folder": "someone", "posts": [post]})  # the mock has no second file yet: 404
+    assert job.results == {"abc0001": "failed"}
     assert len(files(serve, "someone")) == 1
     assert serve.known_posts(known)["known"] == []
+    assert serve.known_posts(known)["unavailable"] == []
+    # The same 404 again can't change anything, so it isn't retried; Download (the userscript) still resends it
+    assert serve.status()["retries"] == {"waiting": 0, "given_up": 0}
 
     archive.media["abc0001_b.jpg"] = b"second image"
     job = run(serve, {"folder": "someone", "posts": [post]})
@@ -195,18 +288,49 @@ def test_post_failing_part_way_is_not_known_until_finished(
     assert serve.known_posts(known)["known"] == ["abc0001"]
 
 
+@pytest.mark.parametrize("store", ("db", "json"))
+def test_dead_link_is_unavailable_and_not_tried_again(
+    serve: DownloadServer, archive: MockArcticShift, tmp_path: Path, store: str
+):
+    """A post whose media the host answers 404 for is gone for good: it isn't retried, and later jobs and /known skip it
+    without asking the host again"""
+    serve.base_args.keep_hashes_db = store == "db"
+    serve.base_args.keep_hashes = store == "json"
+    serve.retries = RetryList(serve, tmp_path / "failed_posts.json")
+    post = archive.add_post("abc0001", NOW)
+    del archive.media["abc0001.jpg"]
+    job = run(serve, {"folder": "someone", "posts": [post]})
+    assert job.state == "done"
+    assert job.results == {"abc0001": "unavailable"} and job.counts["unavailable"] == 1
+    assert serve.status()["retries"] == {"waiting": 0, "given_up": 0}
+    known = serve.known_posts({"folder": "someone", "ids": ["abc0001"]})
+    assert known["unavailable"] == ["abc0001"] and known["known"] == []
+
+    # Back on the host (e.g. a 404 by mistake): still skipped, without a request
+    archive.media["abc0001.jpg"] = b"image"
+    job = run(serve, {"folder": "someone", "posts": [post]})
+    assert job.results == {"abc0001": "unavailable"}
+    assert files(serve, "someone") == []
+
+
+def test_link_without_downloader_is_unavailable(serve: DownloadServer, archive: MockArcticShift):
+    post = archive.add_post("abc0001", NOW, url="https://onlyfans.com/someone")
+    job = run(serve, {"folder": "someone", "posts": [post]})
+    assert job.results == {"abc0001": "unavailable"}
+    assert serve.known_posts({"folder": "someone", "ids": ["abc0001"]})["unavailable"] == ["abc0001"]
+
+
 def test_failed_post_is_retried_without_archive_requests(
     serve: DownloadServer, archive: MockArcticShift, tmp_path: Path
 ):
     clock = [NOW]
     serve.retries = RetryList(serve, tmp_path / "failed_posts.json", lambda: clock[0])
     post = archive.add_post("abc0001", NOW)
-    media = archive.media.pop("abc0001.jpg")
-    job = run(serve, {"folder": "someone", "posts": [post]})  # the media is missing: 404
+    archive.fail("media", status=503)
+    job = run(serve, {"folder": "someone", "posts": [post]})  # the media host is down: 503
     assert job.results == {"abc0001": "failed"}
     assert serve.status()["retries"] == {"waiting": 1, "given_up": 0}
 
-    archive.media["abc0001.jpg"] = media
     archive.requests.clear()
     clock[0] += HOUR
     serve.retries.tick()

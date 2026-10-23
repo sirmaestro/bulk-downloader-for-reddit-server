@@ -24,7 +24,7 @@ packages = ["bdfr", "bdfr.site_downloaders", "bdfr.site_downloaders.fallback_dow
 version = {attr = "bdfr.__version__"}
 
 [tool.setuptools.package-data]
-bdfr = ["default_config.cfg"]
+bdfr = ["default_config.cfg", "dashboard/*"]
 
 [project.optional-dependencies]
 # bdfr similar (perceptual hashes); not needed by serve, so not in the Docker image

@@ -298,28 +298,88 @@ def test_userscript_posts_are_looked_up_in_the_archive_only_with_archive_checks(
     assert lookups({"folder": "unwatched", "posts": [post]})
 
 
-def test_archive_true_reads_one_users_whole_archive_once_then_windows(serve, tmp_path, clock):
+def test_archive_true_with_a_baseline_reads_windows_and_archive_all_reads_the_whole_archive_once(
+    serve, tmp_path, clock
+):
     write_watchlist(
         tmp_path / "watchlist.yaml",
-        "users:\n  - someone\n  - name: wanted\n    archive: true\n",
+        "users:\n  - someone\n  - name: wanted\n    archive: true\n  - name: full\n    archive: all\n",
         archive_checks=False,
     )
     # Checked before (e.g. seeded), but never read in full
+    seeded = {"last_attempt": START - 8 * DAY, "last_success": START - 8 * DAY, "window_end": START - 8 * DAY}
     (tmp_path / "watchlist_state.json").write_text(
-        json.dumps(
-            {"users": {"wanted": {"last_attempt": START - DAY, "last_success": START - DAY, "window_end": START - DAY}}}
-        ),
-        encoding="utf-8",
+        json.dumps({"users": {"wanted": dict(seeded), "full": dict(seeded)}}), encoding="utf-8"
     )
     scheduler = make_scheduler(serve, tmp_path, clock)
     tick(scheduler, serve)
-    first = FakeDownloader.runs[-1]
-    assert first.user == ["wanted"] and first.listing_after is None and first.stop_at_existing == 0
-    assert scheduler.snapshot()["users"][1]["full_archive_done"] == START
+    clock.now += 120
+    tick(scheduler, serve)
+    wanted, full = FakeDownloader.runs
+    # wanted: a window from the baseline, not the whole archive
+    assert wanted.user == ["wanted"] and wanted.listing_after == START - 15 * DAY
+    assert full.user == ["full"] and full.listing_after is None and full.stop_at_existing == 0
+    users = {user["name"]: user for user in scheduler.snapshot()["users"]}
+    assert users["full"]["full_archive_done"] == START + 120 and users["wanted"]["full_archive_done"] is None
     clock.now += 7 * DAY
     tick(scheduler, serve)
-    assert [run.user for run in FakeDownloader.runs] == [["wanted"], ["wanted"]]
-    assert FakeDownloader.runs[-1].listing_after == START - 7 * DAY  # a window from now on
+    clock.now += 120
+    tick(scheduler, serve)
+    assert [run.user for run in FakeDownloader.runs] == [["wanted"], ["full"], ["wanted"], ["full"]]
+    assert FakeDownloader.runs[-1].listing_after == START + 120 - 7 * DAY  # full: windows from now on
+
+
+def write_removed_galleries(folder: Path, keys: dict):
+    """A folder's JSON hash store with unavailable_post_key entries"""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "hash_url_list.json").write_text(json.dumps(keys), encoding="utf-8")
+
+
+def test_known_removed_galleries_are_looked_up_by_id_without_reading_the_archive(serve, tmp_path, clock):
+    write_watchlist(
+        tmp_path / "watchlist.yaml",
+        "users:\n  - name: quiet\n    archive: true\n    aliases: [oldquiet]\n  - plain\n",
+        archive_checks=False,
+    )
+    # quiet hibernates, with a baseline: no window is read, only the removed galleries by ID
+    old = {"newest_post": START - 300 * DAY, "window_end": START - 30 * DAY, "last_success": START - 30 * DAY}
+    (tmp_path / "watchlist_state.json").write_text(json.dumps({"users": {"quiet": old}}), encoding="utf-8")
+    removed = {
+        "unavailable:gal0002": "nodata:removed by Reddit",
+        "unavailable:gal0001": "nodata:removed by a moderator",
+        "unavailable:dead001": "gone:could not download https://i.redd.it/x.jpg",  # gone for good: not looked up
+        "https://i.redd.it/y.jpg": "0123",
+    }
+    write_removed_galleries(tmp_path / "root" / "quiet", removed)
+    write_removed_galleries(tmp_path / "root" / "plain", removed)  # no archive checks: never looked up
+    scheduler = make_scheduler(serve, tmp_path, clock)
+    serve.scheduler = scheduler
+    tick(scheduler, serve)
+    job = next(iter(serve.jobs.values()))
+    assert job.folder == "quiet" and job.user is None and job.scheduled
+    assert job.posts == [{"id": "gal0001"}, {"id": "gal0002"}]
+    assert FakeDownloader.runs[-1].archive_lookups is True
+
+    # Looked at again only after retry_hours
+    clock.now += 23 * 3600
+    tick(scheduler, serve)
+    assert len(FakeDownloader.runs) == 1
+    clock.now += 2 * 3600
+    tick(scheduler, serve)
+    assert len(FakeDownloader.runs) == 2
+
+
+def test_removed_galleries_of_a_user_with_windows_are_looked_up_first(serve, tmp_path, clock):
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
+    write_removed_galleries(tmp_path / "root" / "someone", {"unavailable:gal0001": "nodata:removed by Reddit"})
+    scheduler = make_scheduler(serve, tmp_path, clock)
+    serve.scheduler = scheduler
+    tick(scheduler, serve)
+    clock.now += 120
+    tick(scheduler, serve)
+    lookups, listing = sorted(serve.jobs.values(), key=lambda job: job.created)
+    assert lookups.posts == [{"id": "gal0001"}] and lookups.user is None
+    assert listing.user == "someone" and listing.full_archive  # no baseline: the whole archive
 
 
 def test_own_archive_true_is_read_once_even_while_hibernating(serve, tmp_path, clock):
@@ -349,7 +409,7 @@ def test_archive_false_overrides_archive_checks_and_bad_values_warn(serve, tmp_p
         scheduler = make_scheduler(serve, tmp_path, clock)
         tick(scheduler, serve)
     assert "'archive_checks' must be true or false" in caplog.text
-    assert "u/odd's 'archive' must be true or false" in caplog.text
+    assert "u/odd's 'archive' must be true, false or all" in caplog.text
     assert FakeDownloader.runs == []
 
 
@@ -541,7 +601,12 @@ def test_posts_from_reddit_bring_a_gone_user_back(serve, tmp_path, clock):
     serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock)
     scheduler.note_gone("someone", "suspended")
     assert scheduler.snapshot()["users"] == []
-    scheduler.note_posts([{"id": "abc0001", "author": "someone", "created_utc": START}])
+    # Posts from before the report (e.g. saved earlier and sent in bulk) don't show the account is back
+    scheduler.note_posts([{"id": "abc0001", "author": "someone", "created_utc": clock.now - 30 * DAY}])
+    assert scheduler.snapshot()["users"] == []
+    assert make_scheduler(serve, tmp_path, clock).state["someone"]["gone"] == "suspended"
+    clock.now += DAY
+    scheduler.note_posts([{"id": "abc0002", "author": "someone", "created_utc": clock.now - 60}])
     assert [user["name"] for user in scheduler.snapshot()["users"]] == ["someone"]
 
 

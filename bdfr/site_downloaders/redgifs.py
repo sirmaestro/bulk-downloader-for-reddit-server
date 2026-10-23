@@ -117,7 +117,7 @@ class Redgifs(BaseDownloader):
             elif response_json["gif"]["type"] == 2:  # type 2 is an image
                 if response_json["gif"]["gallery"]:
                     content = Redgifs.retrieve_url(
-                        f'https://api.redgifs.com/v2/gallery/{response_json["gif"]["gallery"]}'
+                        f'https://api.redgifs.com/v2/gallery/{response_json["gif"]["gallery"]}', headers=headers
                     )
                     response_json = json.loads(content.text)
                     out = {p["urls"]["hd"] for p in response_json["gifs"]}

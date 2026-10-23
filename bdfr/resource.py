@@ -19,13 +19,15 @@ from typing import Optional, Union
 
 import requests
 
-from bdfr.exceptions import BulkDownloaderException
+from bdfr.exceptions import BulkDownloaderException, ContentGone
 from bdfr.post import Post
 
 logger = logging.getLogger(__name__)
 
 # Placeholder images that hosts redirect deleted media to; they must not be saved as the media
 REMOVED_PLACEHOLDERS = frozenset({"https://i.imgur.com/removed.png"})
+# Answers meaning the media is gone for good (ContentGone), so the post isn't tried again
+GONE_STATUSES = (404, 410)
 
 _thread_sessions = threading.local()
 
@@ -154,7 +156,7 @@ class Resource:
                 response = http_session().get(url, headers=headers, timeout=120, stream=temp_dir is not None)
                 if response.history and response.url in REMOVED_PLACEHOLDERS:
                     response.close()
-                    raise BulkDownloaderException(f"Removed from the host (redirected to {response.url})")
+                    raise ContentGone(f"Removed from the host (redirected to {response.url})")
                 if re.match(r"^2\d{2}", str(response.status_code)):
                     if temp_dir is None:
                         if response.content:
@@ -168,6 +170,8 @@ class Resource:
                 if response.status_code in (408, 429):
                     retry_after = Resource._retry_after(response)
                     raise requests.exceptions.ConnectionError(f"Response code {response.status_code}")
+                elif response.status_code in GONE_STATUSES:
+                    raise ContentGone(f"Unrecoverable error requesting resource: HTTP Code {response.status_code}")
                 else:
                     raise BulkDownloaderException(
                         f"Unrecoverable error requesting resource: HTTP Code {response.status_code}"

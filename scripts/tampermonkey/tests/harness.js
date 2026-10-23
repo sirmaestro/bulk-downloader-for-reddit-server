@@ -87,8 +87,10 @@ class Harness {
 
     // bdfr serve with nothing downloaded yet, accepting jobs that finish at once
     defaultServe() {
-        this.serve("POST", "/known", { json: { known: [], known_by_link: [], duplicates: [], supported: true } });
+        this.serve("POST", "/known", { json: { known: [], known_by_link: [], duplicates: [], unavailable: [], supported: true } });
         this.serve("POST", "/jobs", (request) => ({ status: 202, json: { id: "job1", state: "queued", ...counts(), total: (request.data.posts || []).length } }));
+        // Only GET /jobs itself: the panel's line on what bdfr serve is doing
+        this.on("GET", new RegExp(`^${SERVER}/jobs$`), { json: { jobs: [] } });
         this.serve("GET", "/jobs/job1", { json: { id: "job1", state: "done", ...counts(), results: {} } });
         this.serve("GET", "/watchlist", { json: { enabled: true, users: [] } });
         this.serve("POST", "/watchlist/gone", (request) => ({ json: request.data }));
@@ -147,7 +149,7 @@ class Harness {
 }
 
 function counts(over = {}) {
-    return { counts: { new: 0, existing: 0, duplicate: 0, skipped: 0, failed: 0, ...over } };
+    return { counts: { new: 0, existing: 0, duplicate: 0, skipped: 0, failed: 0, unavailable: 0, ...over } };
 }
 
 function parse(data) {

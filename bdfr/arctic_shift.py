@@ -44,6 +44,9 @@ class ArcticShift:
         # Posts looked up by ID with why each needed the archive, and listing pages fetched; for the run summary
         self.looked_up: dict[str, str] = {}
         self.listing_pages = 0
+        # IDs of posts whose data came from the archive, and of posts looked up by ID that it doesn't have
+        self.from_archive: set[str] = set()
+        self.not_found: set[str] = set()
         self._last_request = 0.0
 
     def submissions(
@@ -71,6 +74,7 @@ class ArcticShift:
                 return
             for post in new_posts:
                 seen.add(post["id"])
+                self.from_archive.add(post["id"])
                 yield self.to_submission(post)
                 if limit and len(seen) >= limit:
                     return
@@ -103,6 +107,7 @@ class ArcticShift:
                 found = {post["id"]: post for post in self._get("posts/ids", {"ids": ",".join(lookup_ids)})}
                 missing = [post_id for post_id in lookup_ids if post_id not in found]
                 if missing:
+                    self.not_found.update(missing)
                     logger.info(f"Arctic Shift doesn't have {len(missing)} of them: {', '.join(missing)}")
             else:
                 logger.info(f"All {len(batch)} posts have enough data to download; no Arctic Shift lookup needed")
@@ -116,6 +121,8 @@ class ArcticShift:
                     if post["id"] in lookup_ids and lookups:
                         logger.debug(f"Submission {post['id']} not found in Arctic Shift, using the supplied data")
                     data = post
+                else:
+                    self.from_archive.add(post["id"])
                 yield self.to_submission(data)
 
     def _log_lookup(self, reasons: dict[str, str], batch_size: int):

@@ -9,7 +9,7 @@ import pytest
 import requests
 
 from bdfr.configuration import Configuration
-from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
+from bdfr.exceptions import ContentGone, ResourceNotFound, SiteDownloaderError
 from bdfr.site_downloaders.imgur import Imgur
 
 
@@ -97,6 +97,16 @@ def test_album_takes_mp4_unless_originals(originals: bool, expected: list[str], 
     config = Configuration()
     config.imgur_originals = originals
     assert [res.url for res in Imgur(Mock(url="https://imgur.com/a/xWZsDDP"), config).find_resources()] == expected
+
+
+@pytest.mark.parametrize("images", (None, []))
+def test_album_without_images_is_gone(images, monkeypatch: pytest.MonkeyPatch):
+    album = {"is_album": True, "images": images}
+    monkeypatch.setattr(
+        Imgur, "retrieve_url", staticmethod(lambda url, headers=None: Mock(text=json.dumps({"data": album})))
+    )
+    with pytest.raises(ContentGone, match="no images"):
+        Imgur(Mock(url="https://imgur.com/a/C58jnT5"), Configuration()).find_resources()
 
 
 @pytest.mark.parametrize(

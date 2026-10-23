@@ -5,7 +5,7 @@ import logging
 import re
 
 from bdfr.configuration import Configuration
-from bdfr.exceptions import NotADownloadableLinkError
+from bdfr.exceptions import ContentGone, NotADownloadableLinkError
 from bdfr.post import Post
 from bdfr.resource import Resource
 from bdfr.site_downloaders.youtube import Youtube
@@ -23,7 +23,13 @@ class VReddit(Youtube):
             "nooverwrites": True,
         }
         video_url = self._find_video_url()
-        info = self.get_video_attributes(video_url)
+        try:
+            info = self.get_video_attributes(video_url)
+        except NotADownloadableLinkError as e:
+            # v.redd.it answers 403 (or 404) for the playlist of a deleted or removed video
+            if video_url.startswith("https://v.redd.it/") and re.search(r"HTTP Error (403|404|410)\b", str(e)):
+                raise ContentGone(f"The video is gone from v.redd.it (deleted or removed): {e}") from e
+            raise
         # The resource keeps the post's URL so existing downloads and stored URLs still match
         res = Resource(self.post, self.post.url, self._download_video(ytdl_options, video_url, info), info["ext"])
         return [res]

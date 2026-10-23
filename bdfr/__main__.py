@@ -52,6 +52,7 @@ _downloader_options = [
     click.option("--keep-hashes-db", is_flag=True, default=None),
     click.option("--save-hashes-interval", type=click.IntRange(10, 1000), default=None),
     click.option("--stop-at-existing", type=click.IntRange(1), default=None),
+    click.option("--stop-at-unavailable", type=click.IntRange(1), default=None),
     click.option(
         "--parallel",
         type=click.IntRange(1, 16),
@@ -148,6 +149,7 @@ SERVE_DEFAULTS = {
     "file_scheme": "{POSTID}_{TITLE}",
     "parallel": 4,
     "media_only": True,
+    "stop_at_unavailable": 100,
 }
 
 

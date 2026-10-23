@@ -5,9 +5,9 @@ import logging
 from typing import Optional
 
 from bdfr.configuration import Configuration
-from bdfr.exceptions import SiteDownloaderError
+from bdfr.exceptions import ContentGone, SiteDownloaderError
 from bdfr.post import Post
-from bdfr.resource import Resource, http_session
+from bdfr.resource import GONE_STATUSES, Resource, http_session
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__)
@@ -38,14 +38,14 @@ class Gallery(BaseDownloader):
                 # Reddit drops the image list of removed posts
                 removed = getattr(self.post, "removed_by_category", None)
                 if removed:
-                    raise SiteDownloaderError(REMOVED.get(removed, f"removed ({removed.replace('_', ' ')})"))
+                    raise ContentGone(REMOVED.get(removed, f"removed ({removed.replace('_', ' ')})"))
                 logger.debug("No gallery data in the post")
                 raise SiteDownloaderError("No images found in Reddit gallery")
 
         image_urls = self._get_links(items)
         if not image_urls:
             if items:
-                raise SiteDownloaderError(f"None of the {len(items)} gallery images are on i.redd.it any more")
+                raise ContentGone(f"None of the {len(items)} gallery images are on i.redd.it any more")
             raise SiteDownloaderError("No images found in Reddit gallery")
         return [Resource(self.post, url, Resource.retry_download(url)) for url in image_urls]
 
@@ -60,11 +60,14 @@ class Gallery(BaseDownloader):
 
     @staticmethod
     def find_image(image_id: str) -> Optional[str]:
-        """The i.redd.it URL of an image ID, found by trying extensions in turn"""
+        """The i.redd.it URL of an image ID, found by trying extensions in turn; None if i.redd.it says it has none of
+        them. Any other answer (rate limited, a server error) raises SiteDownloaderError, so it isn't taken as gone."""
         possible_extensions = (".jpg", ".png", ".gif", ".gifv", ".jpeg")
         for extension in possible_extensions:
             test_url = f"https://i.redd.it/{image_id}{extension}"
             response = http_session().head(test_url, timeout=30)
             if response.status_code == 200:
                 return test_url
+            if response.status_code not in GONE_STATUSES + (403,):
+                raise SiteDownloaderError(f"i.redd.it answered HTTP {response.status_code} for {test_url}")
         return None

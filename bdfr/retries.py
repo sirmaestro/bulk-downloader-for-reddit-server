@@ -73,6 +73,18 @@ class RetryList:
             if changed:
                 self._save()
 
+    def galleries_without_data(self, folder: str) -> list[str]:
+        """IDs of the folder's failed galleries that have no image list in their post data, which the archive may
+        have (retries reuse the post data, so they can't get it)"""
+        with self._lock:
+            ids = []
+            for key, entry in self.entries.items():
+                post = entry.get("post") or {}
+                gallery = post.get("is_gallery") or "/gallery/" in str(post.get("url") or "")
+                if entry["folder"].lower() == folder.lower() and gallery and not post.get("gallery_data"):
+                    ids.append(key.split("/", 1)[1])
+            return sorted(ids)
+
     def tick(self):
         """Queues the posts that are due, one job per folder (of up to MAX_POSTS_PER_JOB posts)"""
         now = self.clock()
@@ -137,6 +149,29 @@ class RetryList:
         with self._lock:
             waiting = sum(1 for entry in self.entries.values() if entry.get("next_try") is not None)
             return {"waiting": waiting, "given_up": len(self.entries) - waiting}
+
+    def listing(self) -> list[dict]:
+        """Every entry with only its post's title, link and author, for GET /retries: soonest retry first, then the
+        given up, latest failure first"""
+        with self._lock:
+            entries = [
+                {
+                    "folder": entry["folder"],
+                    "id": key.split("/", 1)[1],
+                    "title": entry["post"].get("title"),
+                    "url": entry["post"].get("url"),
+                    "author": entry["post"].get("author"),
+                    "error": entry.get("error"),
+                    "attempts": entry.get("attempts", 0),
+                    "failed": entry.get("failed"),
+                    "next_try": entry.get("next_try"),
+                    "pending": key in self._pending,
+                }
+                for key, entry in self.entries.items()
+            ]
+        return sorted(
+            entries, key=lambda entry: (entry["next_try"] is None, entry["next_try"] or -(entry["failed"] or 0))
+        )
 
     def _load(self) -> dict[str, dict]:
         try:

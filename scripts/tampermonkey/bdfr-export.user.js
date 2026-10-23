@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.12
+// @version      4.14
 // @description  Downloads the posts on old.reddit pages through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @grant        GM_getValue
@@ -76,6 +76,8 @@
         duplicate: ["≡", "#8a8a8a", "Same media as something already downloaded (re-uploaded under another link)"],
         skipped: ["!", "#ffb74d", "Skipped: filtered out or nothing to download (the reason is in serve_log.txt)"],
         failed: ["✖", "#e57373", "Failed (the reason is in serve_log.txt); Download tries it again"],
+        unavailable: ["⊘", "#8a8a8a", "Can't be downloaded: the media is gone (deleted or removed) or no downloader "
+            + "handles the link (the reason is in serve_log.txt); not sent again"],
         fetching: ["⋯", "#8a8a8a", "Reading the gallery's images from Reddit"],
         ignored: ["–", "#6a6a6a", "Ignored"],
     };
@@ -87,6 +89,10 @@
     const TOKEN_KEY = "bdfr-token";
     const ARCHIVE_KEY = "bdfr-full-archive";
     const DEFAULT_SERVER = "http://127.0.0.1:7635";
+    // How often the panel asks bdfr serve what it's doing (GET /jobs), while the tab is visible
+    const ACTIVITY_EVERY_MS = 10 * 1000;
+    // After bdfr serve didn't answer (each failure is logged, so not every 10 seconds)
+    const ACTIVITY_RETRY_MS = 5 * 60 * 1000;
 
     // --- Background sync of watched users (on every old.reddit page) ---
     //
@@ -372,7 +378,10 @@
                     .map((post) => [post.id, post.url]));
                 const known = await request("POST", "/known", { folder: target, ids, links });
                 const had = new Set([...(known.known || []), ...(known.duplicates || [])]);
+                // Posts that can't be downloaded aren't sent, and don't count towards the known ones in a row
+                const unavailable = new Set(known.unavailable || []);
                 for (const post of posts) {
+                    if (unavailable.has(post.id)) continue;
                     if (!had.has(post.id)) {
                         knownInARow = 0;
                         pending.push(post);
@@ -733,7 +742,7 @@
         await refreshKnown();
         const pending = [];
         for (const post of postsOnPage()) {
-            if (["new", "existing", "duplicate", "ignored"].includes(state[post.id])) continue;
+            if (["new", "existing", "duplicate", "unavailable", "ignored"].includes(state[post.id])) continue;
             const reason = ignoreReason(post);
             if (reason) ignore(post, reason);
             else pending.push(post);
@@ -855,6 +864,7 @@
         if (token === null) return false;
         GM_setValue(TOKEN_KEY, token.trim());
         refreshKnown();
+        refreshActivity();
         return true;
     }
 
@@ -886,6 +896,7 @@
             const result = await request("POST", "/known", { folder: page.folder, ids, links });
             for (const id of result.known) state[id] = "existing";
             for (const id of result.duplicates || []) state[id] = "duplicate";
+            for (const id of result.unavailable || []) state[id] = "unavailable";
             applyMarks();
         } catch (error) {
             setStatus(describeError(error));
@@ -899,6 +910,7 @@
         try {
             const job = await request("POST", "/jobs", body);
             watchJob(job.id);
+            refreshActivity();
         } catch (error) {
             setStatus(describeError(error));
             if (error.message === "unauthorised" && configure()) startJob(body, note);
@@ -943,7 +955,7 @@
     // Shift is behind Reddit, so it can't have anything newer than the page; it can only add posts older than it.
     function pageReachesDownloaded() {
         const oldest = oldestOwnPost(true);
-        return Boolean(oldest) && ["existing", "duplicate"].includes(state[oldest.id]);
+        return Boolean(oldest) && ["existing", "duplicate", "unavailable"].includes(state[oldest.id]);
     }
 
     // The oldest of the user's posts on the page, optionally leaving out ignored ones (self posts, crossposts)
@@ -967,13 +979,14 @@
             const c = job.counts;
             const duplicates = c.duplicate || 0;
             const failed = c.failed || 0; // older servers count failures as skipped
-            const done = c.new + c.existing + duplicates + c.skipped + failed;
+            const unavailable = c.unavailable || 0;
+            const done = c.new + c.existing + duplicates + c.skipped + failed + unavailable;
             const progress = job.total ? `${done}/${job.total}` : `${done}`;
             const prefix = { queued: "Queued", running: "Downloading", done: "Done", failed: "Failed" }[job.state];
             const reading = jobNote && job.state === "running" ? ` (page ${jobNote})` : "";
             setStatus(`${prefix}${reading} ${progress} · ${c.new} new · ${c.existing} had`
                 + (duplicates ? ` · ${duplicates} duplicates` : "") + ` · ${c.skipped} skipped`
-                + (failed ? ` · ${failed} failed` : "")
+                + (failed ? ` · ${failed} failed` : "") + (unavailable ? ` · ${unavailable} unavailable` : "")
                 + (job.error ? ` · ${job.error}` : "") + (galleryNote ? ` · ${galleryNote}` : ""));
             Object.assign(state, job.results);
             applyMarks();
@@ -981,7 +994,10 @@
                 console.warn(`BDFR: job ${jobId} failed: ${job.error || "no reason given"} (details in serve_log.txt)`,
                     job.counts);
             }
-            if (job.state === "done" || job.state === "failed") clearInterval(polling);
+            if (job.state === "done" || job.state === "failed") {
+                clearInterval(polling);
+                refreshActivity();
+            }
         };
         poll();
         polling = setInterval(poll, 2000);
@@ -1073,19 +1089,84 @@
         return label;
     }
     const status = document.createElement("div");
+    // What bdfr serve is doing: the running job, and how many wait behind it
+    const activity = document.createElement("div");
+    activity.className = "bdfr-activity";
     // The Status view: what bdfr serve is doing, refreshed while it's open
     const serverView = document.createElement("div");
     serverView.className = "bdfr-server-view";
     serverView.style.cssText = `display:none;border-top:1px solid ${COLOURS.raised};padding-top:3px;`
-        + "max-height:300px;overflow-y:auto;white-space:pre-wrap";
-    panel.append(buttons, status, serverView);
+        + "max-height:360px;overflow-y:auto";
+    panel.append(buttons, status, activity, serverView);
     document.body.appendChild(panel);
 
     let serverViewTimer = null;
+    let activityTimer = null;
+    let activityBusy = false;
+
+    // Shows what bdfr serve is doing, again every ACTIVITY_EVERY_MS while the tab is visible
+    async function refreshActivity() {
+        clearTimeout(activityTimer);
+        activityTimer = null;
+        if (activityBusy) return;
+        if (!GM_getValue(TOKEN_KEY, "")) return (activity.textContent = "");
+        activityBusy = true;
+        let wait = ACTIVITY_EVERY_MS;
+        try {
+            const jobs = await request("GET", "/jobs");
+            activity.textContent = describeActivity(Array.isArray(jobs.jobs) ? jobs.jobs : []);
+        } catch (error) {
+            // An older bdfr serve without a job list (404) shows nothing
+            activity.textContent = ["unreachable", "unauthorised"].includes(error.message) ? describeError(error) : "";
+            wait = ACTIVITY_RETRY_MS;
+        } finally {
+            activityBusy = false;
+        }
+        if (document.visibilityState === "visible") activityTimer = setTimeout(refreshActivity, wait);
+    }
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible" && !activityTimer && !activityBusy) refreshActivity();
+    });
+
+    function describeActivity(jobs) {
+        const running = jobs.find((job) => job.state === "running");
+        const queued = jobs.filter((job) => job.state === "queued");
+        const scheduled = queued.filter((job) => job.scheduled).length;
+        const parts = [running ? `Server running ${describeJobTarget(running)} · ${jobProgress(running)} done`
+            : "Server idle"];
+        if (queued.length > scheduled) parts.push(`${queued.length - scheduled} queued`);
+        if (scheduled) parts.push(`${scheduled} scheduled`);
+        return parts.join(" · ");
+    }
+
+    // e.g. "someone: archive (scheduled)" or "other: 5 posts (retry)"
+    function describeJobTarget(job) {
+        return `${job.folder}: ${describeJobWhat(job)}`;
+    }
+
+    // e.g. "archive (scheduled)" (the folder's user's archive), "archive of u/oldname" or "5 posts (retry)"
+    function describeJobWhat(job) {
+        const archive = job.user && (job.user.toLowerCase() === job.folder.toLowerCase() ? "archive"
+            : `archive of u/${job.user}`);
+        const what = archive || plural(job.total, "post");
+        return what + (job.retry ? " (retry)" : job.scheduled ? " (scheduled)" : "");
+    }
+
+    function plural(count, word) {
+        return `${count} ${word}${count === 1 ? "" : "s"}`;
+    }
+
+    function jobProgress(job) {
+        const done = Object.values(job.counts || {}).reduce((sum, count) => sum + count, 0);
+        return job.total ? `${done}/${job.total}` : `${done}`;
+    }
 
     function toggleServerView() {
         const open = serverView.style.display === "none";
         serverView.style.display = open ? "" : "none";
+        // The job table needs more room than the buttons
+        panel.style.maxWidth = open ? "520px" : "380px";
         clearInterval(serverViewTimer);
         if (!open) return;
         refreshServerView();
@@ -1105,42 +1186,143 @@
             request("GET", "/jobs").catch(() => null),
             request("GET", "/watchlist").catch(() => null),
         ]);
-        serverView.textContent = describeServer(serverStatus, jobs, watchlist).join("\n");
+        serverView.replaceChildren(...describeServer(serverStatus, jobs, watchlist));
+    }
+
+    // How a job's state shows in the Status view
+    const JOB_STATES = {
+        queued: ["◷", COLOURS.text, "Queued"],
+        running: ["⋯", COLOURS.textStrong, "Running"],
+        done: ["✔", MARKS.new[1], "Done"],
+        failed: ["✖", MARKS.failed[1], "Failed (the reason is below it, and in serve_log.txt)"],
+    };
+    // How each count of a job reads in the Status view, coloured like the marks next to post titles
+    const COUNT_NAMES = {
+        new: "new", existing: "had", duplicate: "duplicate", skipped: "skipped", failed: "failed",
+        unavailable: "unavailable",
+    };
+
+    function element(tag, text, style, title) {
+        const node = document.createElement(tag);
+        if (text) node.textContent = text;
+        if (style) node.style.cssText = style;
+        if (title) node.title = title;
+        return node;
     }
 
     function describeServer(serverStatus, jobs, watchlist) {
-        const lines = [];
+        const nodes = [];
         let line = `bdfr serve ${serverStatus.version} · ${serverStatus.running ? "running a job" : "idle"}`
-            + ` · ${serverStatus.queued} queued`;
+            + ` · ${serverStatus.queued} queued`
+            + (serverStatus.scheduled ? ` (${serverStatus.scheduled} scheduled)` : "");
         const retries = serverStatus.retries;
         if (retries) line += ` · failed posts: ${retries.waiting} to retry, ${retries.given_up} given up`;
-        lines.push(line);
+        nodes.push(element("div", line, `color:${COLOURS.textStrong}`));
         if (!jobs) {
-            lines.push("This bdfr serve doesn't list its jobs; update it to see them");
+            nodes.push(element("div", "This bdfr serve doesn't list its jobs; update it to see them"));
+        } else if (!jobs.jobs.length) {
+            nodes.push(element("div", "No jobs since bdfr serve started"));
         } else {
-            lines.push(jobs.jobs.length ? "Recent jobs:" : "No jobs since bdfr serve started");
-            for (const job of jobs.jobs.slice(0, 15)) lines.push(describeJob(job));
+            nodes.push(jobTable(jobs.jobs));
         }
         const users = (watchlist && watchlist.users) || [];
         const problems = users.filter((user) => user.last_error);
         if (problems.length) {
-            lines.push("Watchlist problems:");
-            for (const user of problems) lines.push(`  u/${user.name}: ${user.last_error}`);
+            nodes.push(sectionTitle("Watchlist problems"));
+            for (const user of problems) {
+                const row = element("div", "", "padding-left:14px");
+                row.append(element("span", `u/${user.name}`, `color:${COLOURS.textStrong}`), `: ${user.last_error}`);
+                nodes.push(row);
+            }
         }
         const gone = users.filter((user) => user.gone).length + ((watchlist && watchlist.gone) || []).length;
-        if (gone) lines.push(`${gone} watched users suspended or deleted`);
-        return lines;
+        if (gone) nodes.push(element("div", `${gone} watched users suspended or deleted`, "margin-top:4px"));
+        return nodes;
     }
 
-    function describeJob(job) {
-        const time = new Date(job.created * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        const what = job.user ? `u/${job.user}` : `${job.total} posts${job.retry ? " (retry)" : ""}`;
-        const c = job.counts;
-        const counts = ["new", "existing", "duplicate", "skipped", "failed"]
-            .filter((label) => c[label])
-            .map((label) => `${c[label]} ${label === "existing" ? "had" : label}`);
-        return `  ${time} ${job.folder}: ${what} · ${job.state}` + (counts.length ? ` · ${counts.join(", ")}` : "")
-            + (job.error ? ` · ${job.error}` : "");
+    function sectionTitle(text) {
+        return element("div", text, `color:${COLOURS.textStrong};font-weight:bold;margin-top:5px`);
+    }
+
+    // The running job, the queued ones in the order they'll run, and the finished ones, one row each
+    function jobTable(jobs) {
+        const running = jobs.filter((job) => job.state === "running");
+        // The userscript's jobs run first, then serve's own (archive checks, retries)
+        const waiting = jobs.filter((job) => job.state === "queued")
+            .sort((a, b) => Boolean(a.scheduled) - Boolean(b.scheduled) || a.created - b.created);
+        const finished = jobs.filter((job) => !["running", "queued"].includes(job.state));
+        const table = element("table", "", "border-collapse:collapse;width:100%");
+        table.className = "bdfr-jobs";
+        for (const [title, list] of [["Running", running], ["Waiting", waiting], ["Recent jobs", finished]]) {
+            if (!list.length) continue;
+            const heading = table.insertRow();
+            heading.className = "bdfr-section";
+            const cell = heading.insertCell();
+            cell.colSpan = 6;
+            cell.append(sectionTitle(list.length > 15 ? `${title} (newest 15 of ${list.length})` : title));
+            for (const job of list.slice(0, 15)) addJobRows(table, job);
+        }
+        return table;
+    }
+
+    function addJobRows(table, job) {
+        const row = table.insertRow();
+        row.className = "bdfr-job";
+        row.dataset.state = job.state;
+        const add = (node, style = "") => {
+            const cell = row.insertCell();
+            cell.style.cssText = "padding:1px 8px 1px 0;vertical-align:top;white-space:nowrap;" + style;
+            cell.append(node);
+            return cell;
+        };
+        const [symbol, colour, tip] = JOB_STATES[job.state] || [job.state, COLOURS.text, job.state];
+        add(element("span", symbol, `color:${colour}`, tip), "padding-right:5px");
+        add(element("span", formatJobTime(job.created)));
+        add(element("span", job.folder, `color:${COLOURS.textStrong}`, job.folder),
+            "max-width:130px;overflow:hidden;text-overflow:ellipsis");
+        add(element("span", describeJobWhat(job)));
+        add(jobCounts(job), "white-space:normal;width:100%");
+        add(element("span", jobDuration(job), "", "How long it ran"), "text-align:right;padding-right:0");
+        if (job.error) {
+            const errorRow = table.insertRow();
+            errorRow.className = "bdfr-job-error";
+            const cell = errorRow.insertCell();
+            cell.colSpan = 6;
+            cell.style.cssText = `padding:0 0 2px 14px;color:${MARKS.failed[1]}`;
+            cell.textContent = `↳ ${job.error}`;
+        }
+    }
+
+    // e.g. "17 new · 7 had · 9 duplicate", each number in its mark's colour
+    function jobCounts(job) {
+        const counts = element("span");
+        for (const [label, name] of Object.entries(COUNT_NAMES)) {
+            const count = (job.counts || {})[label];
+            if (!count) continue;
+            if (counts.childNodes.length) counts.append(" · ");
+            const part = element("span", "", "white-space:nowrap", MARKS[label] ? MARKS[label][2] : "");
+            part.append(element("span", String(count), `color:${(MARKS[label] || MARKS.skipped)[1]};font-weight:bold`),
+                ` ${name}`);
+            counts.append(part);
+        }
+        return counts;
+    }
+
+    // The time a job was queued, with the day when it isn't today
+    function formatJobTime(seconds) {
+        const date = new Date(seconds * 1000);
+        const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        if (date.toDateString() === new Date().toDateString()) return time;
+        return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+    }
+
+    // How long a job ran (so far, while it runs); empty for one that hasn't started, or from an older bdfr serve
+    function jobDuration(job) {
+        if (!job.started) return "";
+        const seconds = Math.max(0, Math.round((job.finished || Date.now() / 1000) - job.started));
+        if (seconds < 60) return `${seconds}s`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+        return `${Math.floor(seconds / 3600)}h ${String(Math.floor(seconds / 60) % 60).padStart(2, "0")}m`;
     }
 
     function setStatus(text) {
@@ -1158,6 +1340,7 @@
     updateButtons();
     if (collecting) collect();
     refreshKnown();
+    refreshActivity();
     // Never Ending Reddit and RES add posts after load
     new MutationObserver((mutations) => {
         const addedPosts = mutations.some((mutation) => [...mutation.addedNodes].some((node) =>

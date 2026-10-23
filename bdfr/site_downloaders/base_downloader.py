@@ -8,7 +8,7 @@ from typing import Optional
 import requests
 
 from bdfr.configuration import Configuration
-from bdfr.exceptions import ResourceNotFound, SiteDownloaderError
+from bdfr.exceptions import ContentGone, ResourceNotFound, SiteDownloaderError
 from bdfr.post import Post
 from bdfr.resource import Resource, http_session
 
@@ -34,6 +34,8 @@ class BaseDownloader(ABC):
         except requests.exceptions.RequestException as e:
             logger.exception(e)
             raise SiteDownloaderError(f"Failed to get page {url}")
+        if res.status_code in (404, 410):
+            raise ContentGone(f"Server responded with {res.status_code} to {url}")
         if res.status_code != 200:
             raise ResourceNotFound(f"Server responded with {res.status_code} to {url}")
         return res

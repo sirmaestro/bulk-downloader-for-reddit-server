@@ -32,12 +32,14 @@ LOG_NAMES = {
     "duplicate": "duplicate",
     "skipped": "skipped",
     "failed": "failed",
+    "unavailable": "unavailable",
 }
 
 
 def duplicate_post_key(post_id: str) -> str:
-    """The URL-table key that records a post whose media was all already downloaded under other links, so it's known
-    (by `bdfr serve`'s /known, and by later runs) without downloading it again"""
+    """The URL-table key that records a post whose media was all already downloaded under other links (the same
+    content), or whose several files' links were all downloaded before by other posts, so it's known (by `bdfr serve`'s
+    /known, and by later runs) without downloading it again"""
     return f"post:{post_id}"
 
 
@@ -45,6 +47,13 @@ def incomplete_post_key(post_id: str) -> str:
     """The URL-table key that records a post that failed after some of its files were written (e.g. a gallery that
     stopped part-way). Its ID is then in file names, but the post isn't known until a run finishes it."""
     return f"incomplete:{post_id}"
+
+
+def unavailable_post_key(post_id: str) -> str:
+    """The URL-table key that records a post that can't be downloaded: its media is gone for good (ContentGone) or its
+    link has no downloader. Its value is "<kind>:<reason>"; kind "nodata" (a removed gallery whose post data had no
+    image list) is tried again when the post comes with its image list, e.g. from the archive."""
+    return f"unavailable:{post_id}"
 
 
 def post_ids_in_names(names) -> set[str]:
@@ -103,6 +112,24 @@ class Downloader(Connector):
             return True, consecutive_existing
         return False, consecutive_existing
 
+    def _stop_at_unavailable_reached(self, label: str, consecutive: int) -> (bool, int):
+        """--stop-at-unavailable: a run of posts whose media is gone (deleted, removed) usually means the user deleted
+        their older posts, so the rest of the listing, older still, is very likely gone too. Posts with media count
+        against the run; filtered, failed and already-downloaded posts leave it as it is."""
+        if not self.args.stop_at_unavailable:
+            return False, consecutive
+        if label == "unavailable":
+            consecutive += 1
+        elif label in ("new", "duplicate"):
+            consecutive = 0
+        if consecutive >= self.args.stop_at_unavailable:
+            logger.info(
+                f"{consecutive} posts in a row whose media is gone; stopping this listing (older posts are very "
+                "likely gone too)"
+            )
+            return True, consecutive
+        return False, consecutive
+
     def download(self):
         self._remove_stale_downloads()
         totals = Counter()
@@ -113,6 +140,7 @@ class Downloader(Connector):
         try:
             for generator in self.listings:
                 consecutive_existing = 0
+                consecutive_unavailable = 0
                 # Given posts (--post-json, --link) are all checked; --stop-at-existing is for listings
                 stop_enabled = generator is not getattr(self, "post_list", None)
                 # Submissions being downloaded in threads, oldest first; results are reported in this order
@@ -121,13 +149,14 @@ class Downloader(Connector):
 
                 def finish(submission: Post, run: tuple) -> bool:
                     """Reports a finished submission; returns whether --stop-at-existing ends the listing"""
-                    nonlocal number, consecutive_existing
+                    nonlocal number, consecutive_existing, consecutive_unavailable
                     result, outcome = run
                     number += 1
                     self._log_outcome(number, submission, result, outcome)
                     label = self.log_label(result, outcome)
                     totals[label] += 1
-                    if label == "failed":
+                    # Failures that would happen again with the same post data aren't kept for a retry
+                    if label == "failed" and not outcome["permanent"]:
                         self.failed_posts[submission.id] = (submission.to_dict(), outcome["skip_reason"])
                     totals["files"] += outcome["files"]["written"] + outcome["files"]["linked"]
                     created = getattr(submission, "created_utc", None)
@@ -137,6 +166,9 @@ class Downloader(Connector):
                         self.progress_callback(submission.id, result, label)
                     if not stop_enabled:
                         return False
+                    stop, consecutive_unavailable = self._stop_at_unavailable_reached(label, consecutive_unavailable)
+                    if stop:
+                        return True
                     stop, consecutive_existing = self._stop_at_existing_reached(result, consecutive_existing)
                     return stop
 
@@ -182,10 +214,14 @@ class Downloader(Connector):
         finally:
             if pool:
                 pool.shutdown(wait=True, cancel_futures=True)
-        counts = ", ".join(f"{totals[label]} {name}" for label, name in LOG_NAMES.items())
+        # "unavailable" only when there are any, so the line stays as it was otherwise
+        counts = ", ".join(
+            f"{totals[label]} {name}" for label, name in LOG_NAMES.items() if label != "unavailable" or totals[label]
+        )
         files = totals["files"]
         logger.info(f"Finished {number} posts: {counts}; {files} file{'s' if files != 1 else ''} written")
         logger.info(self.arctic_shift.summary())
+        self._note_not_in_archive()
         self._hash_list_save(False)
         self.close_hash_db()
 
@@ -216,7 +252,10 @@ class Downloader(Connector):
 
     @classmethod
     def log_label(cls, result: Optional[bool], outcome: dict) -> str:
-        """result_label, but "failed" (an error) rather than "skipped" (filtered out or nothing to download)"""
+        """result_label, but "failed" (an error) or "unavailable" (its media is gone for good, or its link has no
+        downloader) rather than "skipped" (filtered out or nothing to download)"""
+        if result is None and outcome["unavailable"]:
+            return "unavailable"
         if result is None and outcome["failed"]:
             return "failed"
         return cls.result_label(result, outcome)
@@ -236,6 +275,7 @@ class Downloader(Connector):
             finally:
                 with self._store_lock:
                     self._note_incomplete(submission)
+                    self._note_unavailable(submission)
                     self._commit_hash_db()
         return result, self._outcome.state
 
@@ -249,9 +289,56 @@ class Downloader(Connector):
         elif self._check_url_exists_or_add(key, None):
             self._forget_url(key)
 
+    def _note_unavailable(self, submission: Post):
+        """Records a submission that can't be downloaded (see unavailable_post_key), so later runs and /known skip it
+        without requests; forgets that once a run writes its files (under _store_lock)"""
+        key = unavailable_post_key(submission.id)
+        value = self._state()["unavailable"]
+        if value:
+            stored = self._get_url_hash(key)
+            if stored != value:
+                # e.g. a removed gallery looked up in the archive, which has no image list either
+                if stored:
+                    self._forget_url(key)
+                self._check_url_exists_or_add(key, value)
+        elif (self._files["written"] or self._files["linked"]) and self._check_url_exists_or_add(key, None):
+            self._forget_url(key)
+
+    def _note_not_in_archive(self):
+        """Removed galleries looked up by ID that the archive doesn't have can't be had anywhere: they're recorded as
+        gone, so they aren't looked up again"""
+        with self._store_lock:
+            for post_id in sorted(self.arctic_shift.not_found):
+                key = unavailable_post_key(post_id)
+                stored = self._get_url_hash(key)
+                if stored and stored.startswith("nodata:"):
+                    self._forget_url(key)
+                    self._check_url_exists_or_add(key, f"gone:{stored.partition(':')[2]}; not in the archive")
+            self._commit_hash_db()
+
+    def _known_removed(self, submission: Post) -> bool:
+        """Whether the post is recorded as a removed gallery whose post data had no image list"""
+        with self._store_lock:
+            stored = self._get_url_hash(unavailable_post_key(submission.id))
+        return bool(stored) and stored.startswith("nodata:")
+
+    def _from_archive(self, submission: Post) -> bool:
+        """Whether the submission's data came from the archive (a listing, or a lookup by ID)"""
+        return submission.id in self.arctic_shift.from_archive
+
     @staticmethod
     def _new_state() -> dict:
-        return {"files": Counter(), "skip_reason": None, "failed": False, "duplicates_of": [], "module": None}
+        return {
+            "files": Counter(),
+            "skip_reason": None,
+            "failed": False,
+            # Failed in a way a retry with the same post data can't change
+            "permanent": False,
+            # "<kind>:<reason>" when the post can't be downloaded (see unavailable_post_key)
+            "unavailable": None,
+            "duplicates_of": [],
+            "module": None,
+        }
 
     def _state(self) -> dict:
         if not hasattr(self._outcome, "state"):
@@ -286,10 +373,16 @@ class Downloader(Connector):
         """Ends the submission as filtered out or with nothing to download"""
         self._skip_reason = reason
 
-    def _fail(self, reason: str) -> None:
-        """Ends the submission as failed, which is logged as a warning"""
+    def _fail(self, reason: str, permanent: bool = False) -> None:
+        """Ends the submission as failed, which is logged as a warning. A permanent failure isn't retried."""
         self._skip_reason = reason
         self._state()["failed"] = True
+        self._state()["permanent"] = permanent
+
+    def _unavailable(self, reason: str, kind: str = "gone") -> None:
+        """Ends the submission as one that can't be downloaded (see unavailable_post_key)"""
+        self._skip_reason = reason
+        self._state()["unavailable"] = f"{kind}:{reason}"
 
     def _log_outcome(self, number: int, submission: Post, result: Optional[bool], outcome: dict):
         """One line per submission saying what happened to it and why, e.g. `new - 1 file written (#1, r/pics,
@@ -353,6 +446,22 @@ class Downloader(Connector):
                 self._files["known_duplicate"] += 1
                 return True
         return False
+
+    def _post_unavailable(self, submission: Post) -> bool:
+        """Whether the post was found unavailable before (see _note_unavailable), checked before any request. A removed
+        gallery that lacked its image list is tried again when the post has one now."""
+        with self._store_lock:
+            stored = self._get_url_hash(unavailable_post_key(submission.id))
+        if not stored:
+            return False
+        kind, _, reason = stored.partition(":")
+        if kind == "nodata" and (getattr(submission, "gallery_data", None) or self._from_archive(submission)):
+            # Tried again with this data; if the archive has no image list either, it's recorded as gone
+            logger.debug("Unavailable before for lack of its image list; trying again with this post's data")
+            return False
+        self._skip_reason = f"unavailable before: {reason}"
+        self._state()["unavailable"] = stored
+        return True
 
     def _incomplete(self, submission: Post) -> bool:
         """Whether the submission failed after writing some of its files (see _note_incomplete); its files are then
@@ -525,6 +634,8 @@ class Downloader(Connector):
             return self._skip("crosspost (--media-only)")
         if self._post_id_known(submission):
             return True
+        if self._post_unavailable(submission):
+            return None
 
         if submission.url is None or submission.url == "":
             return self._skip("no link")
@@ -533,7 +644,7 @@ class Downloader(Connector):
             downloader = downloader_class(submission, self.args)
             logger.debug(f"{downloader_class.__name__}: {submission.url}")
         except errors.NotADownloadableLinkError:
-            return self._skip(f"no downloader for {submission.url}")
+            return self._unavailable(f"no downloader for {submission.url}")
         self._module = downloader_class.__name__
         if downloader_class.__name__.lower() in self.args.disable_module:
             return self._skip(f"module {downloader_class.__name__} is disabled")
@@ -542,6 +653,15 @@ class Downloader(Connector):
         try:
             content = downloader.find_resources()
         except errors.SiteDownloaderError as e:
+            gone = isinstance(e, errors.ContentGone)
+            # A removed gallery may have its image list in the archive's data, unless that's what this is
+            if self._module == "Gallery" and not getattr(submission, "gallery_data", None):
+                if self._from_archive(submission) and (gone or self._known_removed(submission)):
+                    return self._unavailable(f"{e}; the archive has no image list either")
+                if gone:
+                    return self._unavailable(str(e), "nodata")
+            if gone:
+                return self._unavailable(str(e))
             return self._fail(str(e))
         already_downloaded = None
         content = list(content)
@@ -561,6 +681,11 @@ class Downloader(Connector):
                             "temp_dir": destination.parent,
                         }
                     )
+                except errors.ContentGone as e:
+                    if len(content) == 1:
+                        return self._unavailable(f"could not download {res.url}: {e}")
+                    # One of several files: the others may still be there, so the post isn't given up on
+                    return self._fail(f"could not download {res.url}: {e}", permanent=True)
                 except errors.BulkDownloaderException as e:
                     return self._fail(f"could not download {res.url}: {e}")
                 # The hash store is read and changed one thread at a time; the file is written outside the lock
@@ -639,4 +764,11 @@ class Downloader(Connector):
             # Nothing new and nothing failed: remember the post, so it isn't downloaded again to find the same
             with self._store_lock:
                 self._check_url_exists_or_add(duplicate_post_key(submission.id), self._state()["duplicate_hash"])
+        elif len(content) > 1 and self._files["known_link"] == len(content):
+            # Every file was downloaded before under other links' posts (e.g. a gallery posted again, or an old
+            # account's): nothing has this post's ID, so it's remembered the same way, for later runs and /known
+            with self._store_lock:
+                if submission.id not in self._folder_post_ids():
+                    stored_hash = self._get_url_hash(content[0].url) or "known"
+                    self._check_url_exists_or_add(duplicate_post_key(submission.id), stored_hash)
         return already_downloaded

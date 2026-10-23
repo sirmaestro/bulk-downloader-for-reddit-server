@@ -155,9 +155,89 @@ test.describe("talking to bdfr serve fails", () => {
     });
 });
 
+test.describe("the line on what bdfr serve is doing", () => {
+    function activity(page) {
+        return page.locator(".bdfr-activity");
+    }
+
+    test("shows the running job and how many are queued and scheduled", async () => {
+        harness.serve("GET", "/jobs", {
+            json: {
+                jobs: [
+                    { id: "a", folder: "x", user: null, total: 3, state: "queued", scheduled: false, retry: false, created: 3, ...counts() },
+                    { id: "b", folder: "y", user: "y", total: null, state: "queued", scheduled: true, retry: false, created: 2, ...counts() },
+                    { id: "c", folder: "z", user: null, total: 1, state: "queued", scheduled: true, retry: true, created: 2, ...counts() },
+                    { id: "d", folder: "someone", user: "someone", total: null, state: "running", scheduled: true, retry: false, created: 1, ...counts({ new: 2, existing: 5 }) },
+                ],
+            },
+        });
+        const page = await harness.open();
+        await expect(activity(page)).toHaveText("Server running someone: archive (scheduled) · 7 done · 1 queued · 2 scheduled");
+        expect(harness.warnings()).toEqual([]);
+    });
+
+    test("idle, and updated as jobs start", async () => {
+        const page = await harness.open();
+        await expect(activity(page)).toHaveText("Server idle");
+        harness.on("GET", BY_ID, { json: JSON.parse(fixture("by_id-gallery.json")) });
+        harness.on("GET", new RegExp(`^${SERVER}/jobs$`), {
+            json: { jobs: [{ id: "job1", folder: "someone", user: null, total: 4, state: "running", scheduled: false, retry: false, created: 1, ...counts({ new: 1 }) }] },
+        });
+        await download(page);
+        await expect(activity(page)).toHaveText("Server running someone: 4 posts · 1/4 done");
+    });
+
+    test("bdfr serve down", async () => {
+        harness.serve("GET", "/jobs", { network: "error" });
+        harness.serve("POST", "/known", { network: "error" });
+        const page = await harness.open();
+        await expect(activity(page)).toHaveText("bdfr serve isn't running");
+        expect(harness.warnings()).toContainEqual(expect.stringMatching(/GET \/jobs.*couldn't be reached/));
+    });
+
+    test("an older bdfr serve without a job list shows nothing", async () => {
+        harness.serve("GET", "/jobs", { status: 404, json: { error: "Not found" } });
+        const page = await harness.open();
+        await expect.poll(() => harness.requestsTo("GET", `${SERVER}/jobs`).length).toBe(1);
+        await expect(activity(page)).toHaveText("");
+    });
+});
+
+test.describe("unavailable posts", () => {
+    test("are marked from /known and not sent again", async () => {
+        harness.serve("POST", "/known", { json: { known: ["old0001"], known_by_link: [], duplicates: [], unavailable: ["vid0001"], supported: true } });
+        harness.on("GET", BY_ID, { json: JSON.parse(fixture("by_id-gallery.json")) });
+        const page = await harness.open();
+        await expect(page.locator("#thing_t3_vid0001 .bdfr-mark")).toHaveText("⊘");
+        await expect(page.locator("#thing_t3_vid0001 .bdfr-mark")).toHaveAttribute("title", /Can't be downloaded/);
+        await download(page);
+        await expect(status(page)).toHaveText(/^Done/);
+        expect(sentJob().posts.map((post) => post.id)).toEqual(["img0001", "gal0001"]);
+    });
+
+    test("are marked and counted from a job's results", async () => {
+        harness.serve("GET", "/jobs/job1", {
+            json: { id: "job1", state: "done", ...counts({ new: 2, unavailable: 1 }), results: { img0001: "new", gal0001: "new", vid0001: "unavailable" } },
+        });
+        harness.on("GET", BY_ID, { json: JSON.parse(fixture("by_id-gallery.json")) });
+        const page = await harness.open();
+        await download(page);
+        await expect(status(page)).toHaveText(/^Done 3 · 2 new .* · 1 unavailable/);
+        await expect(page.locator("#thing_t3_vid0001 .bdfr-mark")).toHaveText("⊘");
+    });
+});
+
 test.describe("the Status view", () => {
     function serverView(page) {
         return page.locator(".bdfr-server-view");
+    }
+
+    // The job table, one string per row: section titles, jobs as "state | folder | what | counts | duration" (the
+    // time, which depends on the time zone, left out) and error lines
+    function tableRows(page) {
+        return serverView(page).locator("tr").evaluateAll((rows) => rows.map((row) => (row.classList.contains("bdfr-job")
+            ? [...row.cells].filter((_, index) => index !== 1).map((cell) => cell.textContent).join(" | ")
+            : row.textContent)));
     }
 
     test("shows the queue, failed posts, recent jobs and watchlist problems", async () => {
@@ -166,7 +246,7 @@ test.describe("the Status view", () => {
             json: {
                 jobs: [
                     { id: "job2", folder: "someone", user: "someone", total: null, state: "running", error: null, retry: false, created: 1790000000, ...counts({ new: 2 }) },
-                    { id: "job1", folder: "other", user: null, total: 5, state: "failed", error: "Arctic Shift unavailable", retry: true, created: 1789990000, ...counts({ existing: 3, failed: 2 }) },
+                    { id: "job1", folder: "other", user: null, total: 5, state: "failed", error: "Arctic Shift unavailable", retry: true, created: 1789990000, started: 1789990005, finished: 1789990070, ...counts({ existing: 3, failed: 2, unavailable: 1 }) },
                 ],
             },
         });
@@ -176,13 +256,48 @@ test.describe("the Status view", () => {
         await page.getByRole("button", { name: "Status" }).click();
         const view = serverView(page);
         await expect(view).toContainText("bdfr serve 3.1.0 · running a job · 3 queued · failed posts: 4 to retry, 1 given up");
-        await expect(view).toContainText(/someone: u\/someone · running · 2 new/);
-        await expect(view).toContainText(/other: 5 posts \(retry\) · failed · 3 had, 2 failed · Arctic Shift unavailable/);
+        await expect.poll(() => tableRows(page)).toEqual([
+            "Running",
+            "⋯ | someone | archive | 2 new | ",
+            "Recent jobs",
+            "✖ | other | 5 posts (retry) | 3 had · 2 failed · 1 unavailable | 1m 05s",
+            "↳ Arctic Shift unavailable",
+        ]);
+        await expect(view.locator(".bdfr-job").first().locator("td").nth(1)).toHaveText(/\d:\d\d/);
+        await expect(view).toContainText("Watchlist problems");
         await expect(view).toContainText("u/broken: HTTP 422");
         await expect(view).toContainText("1 watched users suspended or deleted");
         await page.getByRole("button", { name: "Status" }).click();
         await expect(view).toBeHidden();
         expect(harness.warnings()).toEqual([]);
+    });
+
+    test("lists running, waiting and finished jobs apart, waiting ones in the order they run", async () => {
+        harness.serve("GET", "/status", { json: { version: "3.2.0", running: "run", queued: 3, scheduled: 2 } });
+        harness.serve("GET", "/jobs", {
+            json: {
+                jobs: [
+                    { id: "mine", folder: "clicked", user: null, total: 4, state: "queued", scheduled: false, retry: false, created: 1790000300, ...counts() },
+                    { id: "retry", folder: "other", user: null, total: 2, state: "queued", scheduled: true, retry: true, created: 1790000200, ...counts() },
+                    { id: "check", folder: "watched", user: "oldname", total: null, state: "queued", scheduled: true, retry: false, created: 1790000100, ...counts() },
+                    { id: "run", folder: "someone", user: "someone", total: null, state: "running", scheduled: true, retry: false, created: 1790000000, ...counts({ new: 1 }) },
+                    { id: "old", folder: "someone", user: null, total: 1, state: "done", scheduled: false, retry: false, created: 1789990000, started: 1789990001, finished: 1789990010, ...counts({ new: 1 }) },
+                ],
+            },
+        });
+        const page = await harness.open();
+        await page.getByRole("button", { name: "Status" }).click();
+        await expect(serverView(page)).toContainText("· 3 queued (2 scheduled)");
+        await expect.poll(() => tableRows(page)).toEqual([
+            "Running",
+            "⋯ | someone | archive (scheduled) | 1 new | ",
+            "Waiting",
+            "◷ | clicked | 4 posts |  | ",
+            "◷ | watched | archive of u/oldname (scheduled) |  | ",
+            "◷ | other | 2 posts (retry) |  | ",
+            "Recent jobs",
+            "✔ | someone | 1 post | 1 new | 9s",
+        ]);
     });
 
     test("an older bdfr serve without a job list", async () => {

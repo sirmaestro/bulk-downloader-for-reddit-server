@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from bdfr.exceptions import BulkDownloaderException
+from bdfr.exceptions import BulkDownloaderException, ContentGone
 from bdfr.resource import TEMP_PREFIX, Resource
 
 
@@ -60,6 +60,15 @@ def test_download_of_removed_placeholder_fails(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(requests.Session, "get", get)
     with pytest.raises(BulkDownloaderException, match="Removed from the host"):
         Resource.http_download("https://i.imgur.com/a.jpg", {})
+
+
+@pytest.mark.parametrize(("status", "gone"), ((404, True), (410, True), (403, False), (500, False), (503, False)))
+def test_only_404_and_410_mean_the_media_is_gone(monkeypatch: pytest.MonkeyPatch, status: int, gone: bool):
+    get = MagicMock(return_value=fake_response("https://i.redd.it/a.jpg", status=status, content=b""))
+    monkeypatch.setattr(requests.Session, "get", get)
+    with pytest.raises(BulkDownloaderException, match=f"HTTP Code {status}") as raised:
+        Resource.http_download("https://i.redd.it/a.jpg", {})
+    assert isinstance(raised.value, ContentGone) is gone
 
 
 def answers(*responses: MagicMock) -> MagicMock:

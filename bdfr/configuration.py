@@ -38,6 +38,7 @@ class Configuration(Namespace):
         self.keep_hashes_db: bool = False
         self.save_hashes_interval: int = 0
         self.stop_at_existing: int = 0
+        self.stop_at_unavailable: int = 0
         self.parallel: int = 1
         self.media_only: bool = False
         # Not an option: set by `bdfr serve` so a user's listing starts below the posts the page already sent
