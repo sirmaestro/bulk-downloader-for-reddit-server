@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -47,6 +47,8 @@ class ArcticShift:
         # IDs of posts whose data came from the archive, and of posts looked up by ID that it doesn't have
         self.from_archive: set[str] = set()
         self.not_found: set[str] = set()
+        # Called with a dict for every request attempt, failed ones included (serve's record of archive requests)
+        self.on_request: Optional[Callable[[dict], None]] = None
         self._last_request = 0.0
 
     def submissions(
@@ -104,7 +106,8 @@ class ArcticShift:
                 )
             elif lookup_ids:
                 self._log_lookup(reasons, len(batch))
-                found = {post["id"]: post for post in self._get("posts/ids", {"ids": ",".join(lookup_ids)})}
+                answer = self._get("posts/ids", {"ids": ",".join(lookup_ids)}, Counter(reasons.values()))
+                found = {post["id"]: post for post in answer}
                 missing = [post_id for post_id in lookup_ids if post_id not in found]
                 if missing:
                     self.not_found.update(missing)
@@ -169,7 +172,8 @@ class ArcticShift:
     def to_submission(data: dict) -> Post:
         return Post(data)
 
-    def _get(self, endpoint: str, params: dict) -> list[dict]:
+    def _get(self, endpoint: str, params: dict, reasons: Optional[Counter] = None) -> list[dict]:
+        """reasons: for ID lookups, how many posts needed the archive for each reason"""
         error = None
         for attempt in range(self.MAX_RETRIES + 1):
             if attempt:
@@ -184,6 +188,7 @@ class ArcticShift:
                 response = self.session.get(f"{self.API_URL}/{endpoint}", params=params, timeout=120)
             except requests.RequestException as e:
                 error = (str(e), None)
+                self._report(endpoint, params, reasons, attempt, None, str(e))
                 continue
             self.request_count += 1
             elapsed = time.monotonic() - self._last_request
@@ -199,11 +204,13 @@ class ArcticShift:
             if response.status_code == 200 and valid and not message:
                 data = payload.get("data") or []
                 logger.info(f"{described} -> {len(data)} posts in {elapsed:.1f}s")
+                self._report(endpoint, params, reasons, attempt, 200, None, len(data), elapsed)
                 return data
             if response.status_code == 200 and not valid:
                 message = "the answer was not Arctic Shift's JSON"
             logger.info(f"{described} -> HTTP {response.status_code}{f' ({message})' if message else ''}")
             error = (message or f"HTTP {response.status_code}", response)
+            self._report(endpoint, params, reasons, attempt, response.status_code, error[0], None, elapsed)
             # The server reports overload as an error message such as "Timeout. Maybe slow down a bit"
             retryable = (
                 response.status_code in (429, 500, 502, 503, 504)
@@ -213,6 +220,36 @@ class ArcticShift:
             if not retryable:
                 raise ArcticShiftError(f"Arctic Shift rejected the request: {error[0]}")
         raise ArcticShiftError(f"Arctic Shift request failed after {self.MAX_RETRIES + 1} attempts: {error[0]}")
+
+    def _report(
+        self,
+        endpoint: str,
+        params: dict,
+        reasons: Optional[Counter],
+        attempt: int,
+        status: Optional[int],
+        error: Optional[str],
+        posts: Optional[int] = None,
+        seconds: Optional[float] = None,
+    ):
+        if self.on_request is None:
+            return
+        try:
+            self.on_request(
+                {
+                    "time": time.time(),
+                    "endpoint": endpoint,
+                    "detail": self._describe_params(params)[1:-1],
+                    "attempt": attempt + 1,
+                    "status": status,
+                    "error": error,
+                    "posts": posts,
+                    "seconds": round(seconds, 1) if seconds is not None else None,
+                    "lookups": dict(reasons) if reasons else None,
+                }
+            )
+        except Exception:
+            logger.exception("Recording an Arctic Shift request failed")
 
     @staticmethod
     def _describe_params(params: dict) -> str:

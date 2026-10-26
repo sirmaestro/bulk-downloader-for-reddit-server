@@ -318,3 +318,133 @@ test.describe("the Status view", () => {
         expect(harness.warnings()).toContainEqual(expect.stringMatching(/GET \/status.*couldn't be reached/));
     });
 });
+
+test.describe("the panel's other buttons", () => {
+    test("Collect, Export and Clear are under Extras, which stays open", async () => {
+        let page = await harness.open();
+        const collect = page.getByRole("button", { name: "Collect", exact: true });
+        await expect(collect).toBeHidden();
+        await page.getByRole("button", { name: "Extras ▸" }).click();
+        await collect.click();
+        await expect(page.getByRole("button", { name: /^Collecting \(\d+\)$/ })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Export" })).toBeVisible();
+        await page.getByRole("button", { name: "Extras ▾" }).click();
+        await expect(page.getByRole("button", { name: "Extras ▸ ●" })).toBeVisible(); // still collecting
+        await page.getByRole("button", { name: "Extras ▸ ●" }).click();
+        page = await harness.open();
+        await expect(page.getByRole("button", { name: /^Collecting/ })).toBeVisible();
+    });
+
+    test("Dashboard opens the server's dashboard with the token in the fragment", async () => {
+        const page = await harness.open();
+        await page.evaluate(() => {
+            window.__opened = [];
+            window.open = (...args) => window.__opened.push(args);
+        });
+        await page.getByRole("button", { name: "Dashboard" }).click();
+        expect(await page.evaluate(() => window.__opened)).toEqual([[`${SERVER}/#token=test-token`, "_blank", "noopener"]]);
+    });
+});
+
+test.describe("www.reddit.com and multireddits", () => {
+    const panel = (page) => page.locator("body > div[style*='position: fixed']");
+    const multireddit = (body) => "<!doctype html><html><head><title>stuff</title></head>"
+        + `<body class="listing-page loggedin">${body}</body></html>`;
+
+    test("a user page in the old design gets the panel", async () => {
+        harness.pages["https://www.reddit.com/user/someone/submitted/"] = fixture("user-page.html");
+        harness.on("GET", BY_ID, { json: JSON.parse(fixture("by_id-gallery.json")) });
+        const page = await harness.open("/user/someone/submitted/?sort=new", "https://www.reddit.com");
+        await download(page);
+        await expect(status(page)).toContainText("Done");
+        const job = sentJob();
+        expect(job.folder).toBe("someone");
+        expect(job.posts.find((post) => post.id === "gal0001").gallery_data).toBeTruthy();
+    });
+
+    test("the new design gets no panel, but user links are rewritten, also inside shadow roots", async () => {
+        harness.pages["https://www.reddit.com/user/expron/m/stuff/"] = multireddit(
+            "<shreddit-app><a id='author' href='/user/poster/'>poster</a>"
+            + "<a id='multi' href='/user/expron/m/stuff/'>stuff</a><div id='host'></div></shreddit-app>");
+        const page = await harness.open("/user/expron/m/stuff/", "https://www.reddit.com");
+        await expect(page.locator("#author")).toHaveAttribute("href",
+            "https://old.reddit.com/user/poster/submitted/?sort=new");
+        await expect(page.locator("#multi")).toHaveAttribute("href", "/user/expron/m/stuff/");
+        const shadowHref = await page.evaluate(() => {
+            const link = document.createElement("a");
+            link.href = "/u/hidden";
+            document.getElementById("host").attachShadow({ mode: "open" }).append(link);
+            link.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, composed: true }));
+            return link.href;
+        });
+        expect(shadowHref).toBe("https://old.reddit.com/user/hidden/submitted/?sort=new");
+        await page.waitForTimeout(300);
+        await expect(panel(page)).toHaveCount(0);
+    });
+
+    test("a multireddit isn't taken for its owner's user page", async () => {
+        for (const path of ["/user/expron/m/stuff/", "/user/expron/m"]) {
+            harness.pages[path] = multireddit("<div id='siteTable'><a id='author' "
+                + "href='https://old.reddit.com/user/poster'>poster</a></div>");
+            const page = await harness.open(path);
+            await expect(page.locator("#author")).toHaveAttribute("href",
+                "https://old.reddit.com/user/poster/submitted/?sort=new");
+            await page.waitForTimeout(300);
+            await expect(panel(page)).toHaveCount(0);
+        }
+    });
+});
+
+test.describe("the page's user on bdfr serve", () => {
+    const watch = (page) => page.locator(".bdfr-watch");
+    const downloads = (page) => page.locator(".bdfr-downloads");
+    const USER = `${SERVER}/user?name=someone`;
+    const info = (watched, over = {}) => ({
+        json: { name: "someone", watchlist: true, watched, folder: (watched && watched.folder) || "someone", downloads: null, ...over },
+    });
+
+    for (const [name, reply, expected] of [
+        ["not on the watchlist", info(null), /^Not watched$/],
+        ["no watchlist at all", info(null, { watchlist: false }), "Not watched: bdfr serve has no watchlist"],
+        ["watched", info({ name: "Someone", folder: "Someone", full_archive_done: 1 }), /^Watched · whole archive read$/],
+        ["watched, whole archive stopped", info({ name: "someone", folder: "someone", full_archive_stopped: 1 }),
+            /^Watched · whole archive not read \(stopped\)$/],
+        ["watched into another folder, hibernating, last check failed", info({
+            name: "someone", folder: "main", hibernating: true, last_error: "HTTP 422",
+        }), "Watched · folder main · hibernating (no recent posts) · archive not read in full yet · last check failed: HTTP 422"],
+        ["an old account", info({ name: "someone", folder: "newname", alias_of: "newname" }),
+            "Watched as an old account of u/newname · folder newname"],
+        ["suspended and left out of the sync", info({ name: "someone", folder: "someone", gone: "suspended", recheck: 1 }),
+            "Watched · suspended on Reddit, not synced for now"],
+    ]) {
+        test(name, async () => {
+            harness.on("GET", USER, reply);
+            const page = await harness.open();
+            await expect(watch(page)).toHaveText(expected);
+            await expect(downloads(page)).toHaveText("Nothing downloaded yet");
+        });
+    }
+
+    test("what the folder holds", async () => {
+        harness.on("GET", USER, info({ name: "someone", folder: "someone" }, {
+            downloads: { posts: 312, file_count: 1204, images: 980, videos: 1, bytes: 41_234_000_000 },
+        }));
+        const page = await harness.open();
+        await expect(downloads(page)).toHaveText("312 posts · 1,204 files (980 images, 1 video) · 41.2 GB");
+    });
+
+    test("not asked on other pages", async () => {
+        harness.pages["/r/pics/"] = harness.pages["/user/someone/submitted/"];
+        await harness.open("/r/pics/");
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(harness.requestsTo("GET", `${SERVER}/user`)).toEqual([]);
+    });
+
+    test("an older bdfr serve without it, or one that's down, shows nothing there", async () => {
+        harness.on("GET", USER, { status: 404, json: { error: "Not found" } });
+        const page = await harness.open();
+        await expect.poll(() => harness.warnings().some((text) => text.startsWith("BDFR: GET /user"))).toBe(true);
+        await expect(watch(page)).toHaveText("");
+        await expect(downloads(page)).toHaveText("");
+    });
+});

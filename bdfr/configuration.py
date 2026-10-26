@@ -39,6 +39,11 @@ class Configuration(Namespace):
         self.save_hashes_interval: int = 0
         self.stop_at_existing: int = 0
         self.stop_at_unavailable: int = 0
+        # Not options: set by `bdfr serve` for whole-archive reads. Stop a listing once this many bytes were written
+        # (the user's storage limit), or after this many pages (DEAD_PAGE_POSTS listing posts) in a row in which under
+        # DEAD_PAGE_SHARE of the posts with media still had it
+        self.stop_at_bytes: int = 0
+        self.stop_at_dead_pages: int = 0
         self.parallel: int = 1
         self.media_only: bool = False
         # Not an option: set by `bdfr serve` so a user's listing starts below the posts the page already sent
@@ -52,10 +57,12 @@ class Configuration(Namespace):
         self.host: Optional[str] = None
         # serve only: where problems are POSTed (e.g. an ntfy topic URL)
         self.notify: Optional[str] = None
+        # serve only: keep failed posts in failed_posts.json and try them again later (bdfr/retries.py)
+        self.retry_failed: bool = False
         self.rename_existing: bool = False
         self.post_json: list[str] = []
         # serve only (no option): given posts may be looked up in Arctic Shift when their data isn't enough to
-        # download from (e.g. galleries Reddit no longer lists the images of); off for folders without archive checks
+        # download from (e.g. galleries Reddit no longer lists the images of); off for retries of failed posts
         self.archive_lookups: bool = True
         self.skip: list[str] = []
         self.skip_domain: list[str] = []

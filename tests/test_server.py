@@ -33,7 +33,8 @@ class FakeDownloader:
         self.args = args
         self.progress_callback = None
         self.errors = []
-        self.newest_post = None
+        self.newest_post = self.oldest_listed = self.stop_reason = None
+        self.bytes_written = 0
         self.failed_posts = {}
 
     def download(self):
@@ -203,6 +204,8 @@ def test_run_server_host(tmp_path: Path, caplog, host, expected, warns):
     assert StopServing.addresses == [(expected, 7635)]
     assert f"http://{expected}:7635" in caplog.text
     assert ("other machines" in caplog.text) is warns
+    # Failed posts aren't retried without --retry-failed
+    assert "--retry-failed is off" in caplog.text
     # Everything goes to serve_log.txt, and the handler is removed when the server stops
     assert f"http://{expected}:7635" in (tmp_path / "config" / "serve_log.txt").read_text(encoding="utf-8")
     assert not any(getattr(h, "baseFilename", "").endswith("serve_log.txt") for h in logging.getLogger().handlers)
@@ -217,6 +220,46 @@ def test_serve_host_option(tmp_path: Path):
     with patch("bdfr.__main__.run_server", lambda config, port: captured.update(config=config)):
         CliRunner().invoke(cli, ["serve", str(tmp_path), "--host", "0.0.0.0"])
     assert captured["config"].host == "0.0.0.0"
+
+
+@pytest.mark.parametrize(("arguments", "expected"), (([], False), (["--retry-failed"], True)))
+def test_retry_failed_option(tmp_path: Path, arguments: list, expected: bool):
+    from click.testing import CliRunner
+
+    from bdfr.__main__ import cli
+
+    captured = {}
+    with patch("bdfr.__main__.run_server", lambda config, port: captured.update(config=config)):
+        CliRunner().invoke(cli, ["serve", str(tmp_path), *arguments])
+    assert captured["config"].retry_failed is expected
+
+
+@pytest.mark.parametrize(
+    ("fields", "purpose"),
+    (
+        ({"user": "x", "full_archive": True, "scheduled": True}, "watchlist: whole archive"),
+        ({"user": "x", "after": 1, "scheduled": True}, "watchlist: weekly check"),
+        ({"posts": [{}], "scheduled": True}, "watchlist: removed gallery lookups"),
+        ({"posts": [{}], "scheduled": True, "retry": True}, "retry of failed posts"),
+        ({"user": "x", "full_archive": True}, "Download: whole archive"),
+        ({"user": "x"}, "Download: new posts in archive"),
+        ({"posts": [{}]}, "userscript posts: lookups"),
+    ),
+)
+def test_request_purpose(fields: dict, purpose: str):
+    assert DownloadServer._purpose(Job("id", "folder", **fields)) == purpose
+
+
+def test_requests_endpoint(server, tmp_path: Path):
+    from bdfr.request_log import RequestLog
+
+    download_server, base = server
+    assert call(base, "GET", "/requests") == (200, {"enabled": False})
+    download_server.requests = RequestLog(tmp_path / "requests.jsonl")
+    download_server.requests.record({"time": time.time(), "purpose": "watchlist: weekly check", "status": 200})
+    status, body = call(base, "GET", "/requests")
+    assert status == 200 and body["enabled"] is True
+    assert body["totals"]["day"]["requests"] == 1
 
 
 def test_load_token_is_stable(tmp_path: Path):
@@ -346,8 +389,8 @@ def test_serve_defaults_can_be_turned_off_in_opts(tmp_path: Path):
     assert captured["config"].keep_hashes_db is True
 
 
-@pytest.mark.parametrize(("archive", "stop"), ((None, 5), ("all", 0)))
-def test_user_job_archive(server, archive, stop):
+@pytest.mark.parametrize(("archive", "stop", "dead_pages"), ((None, 5, 0), ("all", 0, 2)))
+def test_user_job_archive(server, archive, stop, dead_pages):
     _, base = server
     body = {"folder": "someone", "user": "someone", "posts": []}
     if archive:
@@ -356,6 +399,22 @@ def test_user_job_archive(server, archive, stop):
     assert wait_for(base, job["id"])["state"] == "done"
     args, _ = FakeDownloader.runs[0]
     assert args.user == ["someone"] and args.stop_at_existing == stop
+    # A whole-archive read stops after two dead pages rather than a run of unavailable posts
+    assert args.stop_at_dead_pages == dead_pages
+    if archive:
+        assert args.stop_at_unavailable == 0
+    assert args.stop_at_bytes == 0
+
+
+def test_user_job_limit_bytes(server):
+    _, base = server
+    body = {"folder": "someone", "user": "someone", "archive": "all", "limit_bytes": 5_000_000}
+    _, job = call(base, "POST", "/jobs", body)
+    assert wait_for(base, job["id"])["bytes_written"] == 0
+    assert FakeDownloader.runs[0][0].stop_at_bytes == 5_000_000
+    for bad in (0, -1, "5", True):
+        assert call(base, "POST", "/jobs", dict(body, limit_bytes=bad))[0] == 400
+    assert call(base, "POST", "/jobs", {"folder": "x", "posts": [{"id": "a"}], "limit_bytes": 5})[0] == 400
 
 
 def test_known_duplicates(server, tmp_path: Path):
@@ -409,6 +468,36 @@ def test_watchlist_gone_endpoint(server, tmp_path: Path):
     assert call(base, "POST", "/watchlist/gone", {"user": "bad name!", "gone": None})[0] == 400
     assert call(base, "POST", "/watchlist/gone", {"user": "someone", "gone": None})[0] == 200
     assert [user["name"] for user in call(base, "GET", "/watchlist")[1]["users"]] == ["someone"]
+
+
+def test_user_endpoint(server, tmp_path: Path):
+    from bdfr.scheduler import BaselineScheduler
+
+    download_server, base = server
+    assert call(base, "GET", "/user?name=someone") == (
+        200,
+        {"name": "someone", "watchlist": False, "watched": None, "folder": "someone", "downloads": None},
+    )
+    assert call(base, "GET", "/user?name=bad%20name!")[0] == 400
+    assert call(base, "GET", "/user")[0] == 400
+    watchlist = "users:\n  - {name: someone, folder: main, aliases: [oldname]}\n  - left\n"
+    (tmp_path / "watchlist.yaml").write_text(watchlist, encoding="utf-8")
+    download_server.scheduler = BaselineScheduler(download_server, tmp_path / "watchlist.yaml")
+    (tmp_path / "main" / "sub").mkdir(parents=True)
+    # A gallery's two files are one post; a folder's own files aren't counted
+    for name in ("abc123_a gallery_1.jpg", "abc123_a gallery_2.jpg", "def456_a video.mp4", "hashes.sqlite"):
+        (tmp_path / "main" / name).write_bytes(b"x" * 100)
+    (tmp_path / "main" / "sub" / "ghi789_an image_2024.png").write_bytes(b"x" * 100)
+    status, body = call(base, "GET", "/user?name=Someone")
+    assert status == 200
+    assert body["watched"]["name"] == "someone" and body["folder"] == "main"
+    assert body["downloads"] == {"file_count": 4, "bytes": 400, "videos": 1, "images": 3, "posts": 3}
+    _, body = call(base, "GET", "/user?name=oldname")
+    assert body["watched"]["alias_of"] == "someone" and body["folder"] == "main"
+    assert call(base, "GET", "/user?name=nobody")[1]["watched"] is None
+    download_server.scheduler.note_gone("left", "suspended")
+    _, body = call(base, "GET", "/user?name=left")
+    assert body["watched"]["gone"] == "suspended" and body["downloads"] is None
 
 
 def test_retry_jobs_never_look_posts_up(server):
@@ -589,9 +678,20 @@ def test_retry_list_endpoint(server, tmp_path: Path):
             "attempts": 1,
             "failed": 1000.0,
             "next_try": 1000.0 + 3600,
+            "stopped": False,
             "pending": False,
         }
     ]
+    # The dashboard's Stop: given up on, and later failures don't put it back
+    assert call(base, "POST", "/retries/stop", {"folder": "pics", "id": "abc123"}) == (
+        200,
+        {"folder": "pics", "id": "abc123", "stopped": True},
+    )
+    download_server.retries.note_job("pics", {"abc123": "failed"}, {"abc123": (post, "HTTP 503")})
+    entry = call(base, "GET", "/retries")[1]["posts"][0]
+    assert entry["next_try"] is None and entry["stopped"] is True and entry["error"] == "HTTP 503"
+    assert call(base, "POST", "/retries/stop", {"folder": "pics", "id": "nope"})[0] == 400
+    assert call(base, "POST", "/retries/stop", {"folder": "pics"})[0] == 400
 
 
 def test_folders_endpoint(server, tmp_path: Path):
@@ -621,8 +721,18 @@ def test_folders_endpoint(server, tmp_path: Path):
     assert status == 200
     folders = {folder["name"]: folder for folder in body["folders"]}
     assert list(folders) == ["broken", "empty", "json_folder", "sqlite_folder"]
+    (tmp_path / "sqlite_folder" / "abc123_one.jpg").write_bytes(b"x" * 300)
+    (tmp_path / "sqlite_folder" / "def456_two.mp4").write_bytes(b"x" * 700)
+    (tmp_path / "sqlite_folder" / "ghi789_text.txt").write_bytes(b"x" * 50)
+    status, body = call(base, "GET", "/folders")
+    folders = {folder["name"]: folder for folder in body["folders"]}
     assert folders["sqlite_folder"] == {
         "name": "sqlite_folder",
+        "file_count": 3,  # hashes.sqlite isn't counted
+        "bytes": 1050,
+        "videos": 1,
+        "images": 1,
+        "posts": 3,
         "retries": 0,
         "store": "sqlite",
         "files": 2,
@@ -633,6 +743,11 @@ def test_folders_endpoint(server, tmp_path: Path):
     }
     assert folders["json_folder"] == {
         "name": "json_folder",
+        "file_count": 0,
+        "bytes": 0,
+        "videos": 0,
+        "images": 0,
+        "posts": 0,
         "retries": 0,
         "store": "json",
         "files": 1,
@@ -641,5 +756,14 @@ def test_folders_endpoint(server, tmp_path: Path):
         "unavailable": 1,
         "incomplete": 0,
     }
-    assert folders["empty"] == {"name": "empty", "retries": 2, "store": None}
+    assert folders["empty"] == {
+        "name": "empty",
+        "retries": 2,
+        "store": None,
+        "file_count": 0,
+        "bytes": 0,
+        "videos": 0,
+        "images": 0,
+        "posts": 0,
+    }
     assert folders["broken"]["store"] == "error"

@@ -25,6 +25,9 @@ class RetryList:
     # job downloads it after all)
     BACKOFF_HOURS = (1, 6, 24, 72, 168)
     CHECK_SECONDS = 60
+    # Posts older than this aren't kept for a retry: their host has usually dropped them for good, and they come
+    # back with the next archive read anyway
+    MAX_AGE_DAYS = 365
 
     def __init__(self, server, path: Path, clock: Callable[[], float] = time.time):
         self.server = server
@@ -52,8 +55,9 @@ class RetryList:
             time.sleep(self.CHECK_SECONDS)
 
     def note_job(self, folder: str, results: dict[str, str], failed_posts: dict[str, tuple[dict, str]]):
-        """Records a finished job's posts: failed ones (ID -> (post data, reason)) are kept for a retry, and any other
-        result for a kept post (downloaded, already there, filtered out) drops it"""
+        """Records a finished job's posts: failed ones (ID -> (post data, reason)) are kept for a retry, unless they
+        were posted over MAX_AGE_DAYS ago or are stopped (`stop`), and any other result for a kept post (downloaded,
+        already there, filtered out) drops it"""
         now = self.clock()
         changed = False
         with self._lock:
@@ -65,13 +69,32 @@ class RetryList:
                 if post_id not in failed_posts:
                     continue
                 data, reason = failed_posts[post_id]
+                created = data.get("created_utc")
+                if isinstance(created, (int, float)) and now - created > self.MAX_AGE_DAYS * 24 * HOUR:
+                    logger.debug(f"Not retrying post {post_id} in {folder}: posted over {self.MAX_AGE_DAYS} days ago")
+                    continue
                 entry = self.entries.get(key) or {"folder": folder, "attempts": 0}
                 entry.update(post=data, error=reason, failed=now)
+                if entry.get("stopped"):
+                    continue
                 self._schedule(entry, post_id, now)
                 self.entries[key] = entry
                 changed = True
             if changed:
                 self._save()
+
+    def stop(self, folder: str, post_id: str) -> dict:
+        """Stops retrying a post (the dashboard's Stop): it stays listed as given up, and later failures don't put it
+        back; a job that downloads it still drops it"""
+        key = self.key(folder, post_id)
+        with self._lock:
+            entry = self.entries.get(key)
+            if entry is None:
+                raise ValueError(f"Post {post_id} in {folder} isn't on the retry list")
+            entry.update(next_try=None, stopped=self.clock())
+            self._save()
+        logger.info(f"Not retrying post {post_id} in {folder} any more (stopped in the dashboard)")
+        return {"folder": folder, "id": post_id, "stopped": True}
 
     def galleries_without_data(self, folder: str) -> list[str]:
         """IDs of the folder's failed galleries that have no image list in their post data, which the archive may
@@ -165,6 +188,7 @@ class RetryList:
                     "attempts": entry.get("attempts", 0),
                     "failed": entry.get("failed"),
                     "next_try": entry.get("next_try"),
+                    "stopped": bool(entry.get("stopped")),
                     "pending": key in self._pending,
                 }
                 for key, entry in self.entries.items()

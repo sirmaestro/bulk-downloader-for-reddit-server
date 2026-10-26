@@ -124,7 +124,8 @@ def make_downloader(tmp_path: Path, posts: list[dict]) -> Downloader:
     downloader.master_hash_list, downloader.master_file_list, downloader.master_url_list = {}, {}, {}
     downloader._hash_db = None
     downloader.progress_callback = None
-    downloader.newest_post = None
+    downloader.newest_post = downloader.oldest_listed = downloader.stop_reason = None
+    downloader.bytes_written = 0
     downloader.errors, downloader.failed_posts = [], {}
     client = ArcticShift()
     downloader.arctic_shift = client

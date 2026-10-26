@@ -15,6 +15,7 @@
   <nav id="tabs" class="tabs" hidden>
     <button data-tab="overview" class="active">Overview</button>
     <button data-tab="watchlist">Watchlist</button>
+    <button data-tab="archive">Archive</button>
     <button data-tab="retries">Retries</button>
     <button data-tab="folders">Folders</button>
     <button data-tab="log">Log</button>
@@ -63,12 +64,28 @@
     <div id="watch-gone"></div>
   </section>
 
+  <section id="view-archive" class="view" hidden>
+    <div class="section-head">
+      <h2>Arctic Shift requests</h2>
+      <div class="controls"><input id="archive-filter" type="search" placeholder="Filter latest"></div>
+    </div>
+    <p id="archive-path" class="muted"></p>
+    <div id="archive-tiles" class="tiles"></div>
+    <h2>Why</h2>
+    <div class="table-wrap"><table id="archive-purposes" class="data"></table></div>
+    <div id="archive-lookups"></div>
+    <div id="archive-errors"></div>
+    <div id="archive-users"></div>
+    <h2>Latest requests</h2>
+    <div class="table-wrap"><table id="archive-recent" class="data"></table></div>
+  </section>
+
   <section id="view-retries" class="view" hidden>
     <div class="section-head">
       <h2>Retry list</h2>
       <div class="controls"><input id="retry-filter" type="search" placeholder="Filter"></div>
     </div>
-    <p class="muted">Failed posts are tried again after 1 h, 6 h, 1, 3 and 7 days, without Arctic Shift requests,
+    <p class="muted">With <code>--retry-failed</code>, failed posts are tried again after 1 h, 6 h, 1, 3 and 7 days, without Arctic Shift requests,
       then given up (still listed until a job downloads them).</p>
     <div class="table-wrap"><table id="retries" class="data"></table></div>
   </section>
@@ -78,7 +95,7 @@
       <h2>Folders</h2>
       <div class="controls"><button id="folders-load">Refresh</button></div>
     </div>
-    <p class="muted">Read from each folder's hash store when you open this tab or press Refresh.</p>
+    <p class="muted">Read from each folder's files and hash store when you open this tab or press Refresh.</p>
     <div class="table-wrap"><table id="folders" class="data"></table></div>
   </section>
 

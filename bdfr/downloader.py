@@ -98,6 +98,12 @@ class Downloader(Connector):
         self.failed_posts: dict[str, tuple[dict, str]] = {}
         # When the newest submission the run went through was posted (whatever happened to it), or None
         self.newest_post: Optional[float] = None
+        # Bytes of the files written (not hard links), for args.stop_at_bytes (serve's storage limit)
+        self.bytes_written = 0
+        # Why a listing was stopped by stop_at_bytes ("limit") or stop_at_dead_pages ("dead"), and the oldest listing
+        # post the run went through, where a whole-archive read stopped at its limit carries on
+        self.stop_reason: Optional[str] = None
+        self.oldest_listed: Optional[float] = None
 
     def _stop_at_existing_reached(self, result, consecutive_existing: int) -> (bool, int):
         # result: True = already downloaded, False = newly downloaded, None = neither (filtered or failed)
@@ -130,6 +136,16 @@ class Downloader(Connector):
             return True, consecutive
         return False, consecutive
 
+    # A page of a listing, for stop_at_dead_pages, and the share of its posts with media that must still have it
+    DEAD_PAGE_POSTS = 100
+    DEAD_PAGE_SHARE = 0.10
+
+    def _dead_page(self, page: Counter) -> bool:
+        """Whether a page of a listing had under DEAD_PAGE_SHARE of its posts with media still there (downloaded now,
+        already, or as a duplicate) rather than gone (unavailable); a page without either isn't dead"""
+        seen = page["alive"] + page["gone"]
+        return bool(seen) and page["alive"] / seen < self.DEAD_PAGE_SHARE
+
     def download(self):
         self._remove_stale_downloads()
         totals = Counter()
@@ -141,6 +157,8 @@ class Downloader(Connector):
             for generator in self.listings:
                 consecutive_existing = 0
                 consecutive_unavailable = 0
+                page: Counter = Counter()
+                dead_pages = 0
                 # Given posts (--post-json, --link) are all checked; --stop-at-existing is for listings
                 stop_enabled = generator is not getattr(self, "post_list", None)
                 # Submissions being downloaded in threads, oldest first; results are reported in this order
@@ -149,9 +167,10 @@ class Downloader(Connector):
 
                 def finish(submission: Post, run: tuple) -> bool:
                     """Reports a finished submission; returns whether --stop-at-existing ends the listing"""
-                    nonlocal number, consecutive_existing, consecutive_unavailable
+                    nonlocal number, consecutive_existing, consecutive_unavailable, page, dead_pages
                     result, outcome = run
                     number += 1
+                    self.bytes_written += outcome["files"]["bytes"]
                     self._log_outcome(number, submission, result, outcome)
                     label = self.log_label(result, outcome)
                     totals[label] += 1
@@ -166,6 +185,32 @@ class Downloader(Connector):
                         self.progress_callback(submission.id, result, label)
                     if not stop_enabled:
                         return False
+                    if isinstance(created, (int, float)) and (
+                        self.oldest_listed is None or created < self.oldest_listed
+                    ):
+                        self.oldest_listed = created
+                    if self.args.stop_at_bytes and self.bytes_written >= self.args.stop_at_bytes:
+                        logger.info(
+                            f"{self.bytes_written / 1e9:.1f} GB written, the storage limit; stopping this listing"
+                        )
+                        self.stop_reason = "limit"
+                        return True
+                    if self.args.stop_at_dead_pages:
+                        page["posts"] += 1
+                        if label in ("new", "existing", "duplicate"):
+                            page["alive"] += 1
+                        elif label == "unavailable":
+                            page["gone"] += 1
+                        if page["posts"] >= self.DEAD_PAGE_POSTS:
+                            dead_pages = dead_pages + 1 if self._dead_page(page) else 0
+                            page = Counter()
+                            if dead_pages >= self.args.stop_at_dead_pages:
+                                logger.info(
+                                    f"{dead_pages} pages in a row with under {self.DEAD_PAGE_SHARE:.0%} of their media "
+                                    "left; stopping this listing (older posts are very likely gone too)"
+                                )
+                                self.stop_reason = "dead"
+                                return True
                     stop, consecutive_unavailable = self._stop_at_unavailable_reached(label, consecutive_unavailable)
                     if stop:
                         return True
@@ -730,6 +775,7 @@ class Downloader(Connector):
                     self._writing.add(resource_hash)
                 try:
                     res.save(destination)
+                    self._files["bytes"] += destination.stat().st_size
                     creation_time = time.mktime(datetime.fromtimestamp(submission.created_utc).timetuple())
                     os.utime(destination, (creation_time, creation_time))
                     logger.debug(f"Wrote {destination}")

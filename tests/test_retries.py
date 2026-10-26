@@ -106,3 +106,25 @@ def test_giving_up_is_notified(retries: RetryList):
         retries.note_job("someone", {"a": "failed"}, {"a": failed("a")})
     retries.server.notify.assert_called_once()
     assert "Giving up on post a in someone" in retries.server.notify.call_args.args[0]
+
+
+def test_posts_over_a_year_old_are_not_kept(retries: RetryList):
+    old, recent = failed("old"), failed("recent")
+    old[0]["created_utc"] = retries.clock.now - 366 * 24 * HOUR
+    recent[0]["created_utc"] = retries.clock.now - 300 * 24 * HOUR
+    retries.note_job("someone", {"old": "failed", "recent": "failed"}, {"old": old, "recent": recent})
+    assert list(retries.entries) == ["someone/recent"]
+
+
+def test_stopped_posts_are_not_retried(retries: RetryList):
+    retries.note_job("someone", {"a": "failed"}, {"a": failed("a")})
+    retries.stop("someone", "a")
+    retries.clock.now += 1000 * HOUR
+    retries.tick()
+    retries.server.submit.assert_not_called()
+    assert retries.snapshot() == {"waiting": 0, "given_up": 1}
+    # A job that gets it after all still drops it
+    retries.note_job("someone", {"a": "new"}, {})
+    assert retries.entries == {}
+    with pytest.raises(ValueError, match="isn't on the retry list"):
+        retries.stop("someone", "a")

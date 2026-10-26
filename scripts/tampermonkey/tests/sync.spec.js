@@ -1,7 +1,7 @@
 // The background sync: on any old.reddit page, watched users (bdfr serve's /watchlist) that are due have their newest
 // posts read from Reddit with the browser's login and sent to bdfr serve. Every failure is logged as a warning.
 const { test, expect } = require("@playwright/test");
-const { Harness, fixture, SERVER } = require("./harness");
+const { Harness, fixture, SERVER, WATCHLIST } = require("./harness");
 
 const SUBMITTED = (user) => new RegExp(`^https://old\\.reddit\\.com/user/${user}/submitted\\.json\\?`);
 const HOUR = 3600 * 1000;
@@ -38,7 +38,7 @@ function jobsFor(folder) {
 
 // Waits for a sync to have started (it reads the watchlist first) and for no tab to be syncing
 async function syncFinished(page) {
-    await expect.poll(() => harness.requestsTo("GET", `${SERVER}/watchlist`).length, { timeout: 10000 }).toBeGreaterThan(0);
+    await expect.poll(() => harness.requestsTo("GET", WATCHLIST).length, { timeout: 10000 }).toBeGreaterThan(0);
     await expect.poll(() => page.evaluate(() => GM_getValue("bdfr-sync-lock", null)), { timeout: 10000 }).toBeNull();
 }
 
@@ -91,9 +91,36 @@ test("sends a watched user's new media posts, from any page, stopping at 5 known
 
     // Synced now: another page load doesn't read Reddit again
     await harness.open("/");
-    await expect.poll(() => harness.requestsTo("GET", `${SERVER}/watchlist`).length, { timeout: 10000 }).toBe(2);
+    await expect.poll(() => harness.requestsTo("GET", WATCHLIST).length, { timeout: 10000 }).toBe(2);
     await syncFinished(page);
     expect(harness.requestsTo("GET", SUBMITTED("someone"))).toHaveLength(2);
+});
+
+test("reads to the end of Reddit's listing when bdfr serve asks, then reports it", async ({ context }) => {
+    await setUp(context);
+    harness.serve("GET", "/watchlist", {
+        json: { enabled: true, users: [{ name: "someone", folder: "someone folder", read_reddit_to_end: true }], gone: [] },
+    });
+    someoneOnReddit();
+    harness.on("GET", /submitted\.json.*after=t3_never01/, { json: { kind: "Listing", data: { children: [], after: null } } });
+    const page = await harness.open("/");
+    await expect.poll(() => harness.requestsTo("POST", `${SERVER}/watchlist/reddit`).length, { timeout: 10000 }).toBe(1);
+    await syncFinished(page);
+    // Past the 5 known posts in a row, to the listing's end
+    expect(harness.requestsTo("GET", SUBMITTED("someone"))).toHaveLength(3);
+    expect(jobsFor("someone folder")[0].posts.map((post) => post.id)).toEqual(["new0001", "gal0002", "new0002", "never01"]);
+    expect(harness.requestsTo("POST", `${SERVER}/watchlist/reddit`)[0].data).toEqual({ user: "someone", oldest: 1792500000 });
+    expect(harness.warnings()).toEqual([]);
+});
+
+test("a sync stopped by known posts doesn't report reaching the end", async ({ context }) => {
+    await setUp(context);
+    watch("someone");
+    someoneOnReddit();
+    const page = await harness.open("/");
+    await expect.poll(() => jobsFor("someone folder").length, { timeout: 10000 }).toBe(1);
+    await syncFinished(page);
+    expect(harness.requestsTo("POST", `${SERVER}/watchlist/reddit`)).toEqual([]);
 });
 
 test("nothing new: no job is sent", async ({ context }) => {
@@ -131,7 +158,7 @@ test("another tab is syncing: this one doesn't", async ({ context }) => {
     watch("someone");
     const page = await harness.open("/");
     await page.waitForTimeout(3000);
-    expect(harness.requestsTo("GET", `${SERVER}/watchlist`)).toEqual([]);
+    expect(harness.requestsTo("GET", WATCHLIST)).toEqual([]);
 });
 
 test("another tab is syncing: Sync says which tab and how far it got", async ({ context }) => {
@@ -147,7 +174,7 @@ test("another tab is syncing: Sync says which tab and how far it got", async ({ 
     await expect(page.getByText(
         "Already syncing in the tab on old.reddit.com/r/pics/ (its title starts with ⟳): Syncing u/someone (2/5)…",
     )).toBeVisible();
-    expect(harness.requestsTo("GET", `${SERVER}/watchlist`)).toEqual([]);
+    expect(harness.requestsTo("GET", WATCHLIST)).toEqual([]);
 });
 
 test("the syncing tab's title is marked and its lock says where and how far, until it's done", async ({ context }) => {
@@ -211,7 +238,7 @@ test.describe("suspended or deleted accounts: recognised, checked again weekly",
                 GM_setValue("bdfr-sync", s);
             });
             await harness.open("/");
-            await expect.poll(() => harness.requestsTo("GET", `${SERVER}/watchlist`).length, { timeout: 10000 }).toBe(2);
+            await expect.poll(() => harness.requestsTo("GET", WATCHLIST).length, { timeout: 10000 }).toBe(2);
             await syncFinished(page);
             expect(harness.requestsTo("GET", SUBMITTED("broken"))).toHaveLength(1);
             await page.evaluate(() => {
@@ -256,7 +283,7 @@ test.describe("suspended or deleted accounts: recognised, checked again weekly",
         expect(harness.requestsTo("POST", `${SERVER}/watchlist/gone`).map((r) => r.data)).toEqual([{ user: "broken", gone: "deleted" }]);
         expect(harness.requestsTo("GET", /old\.reddit\.com/)).toEqual([]);
         await harness.open("/");
-        await expect.poll(() => harness.requestsTo("GET", `${SERVER}/watchlist`).length, { timeout: 10000 }).toBe(2);
+        await expect.poll(() => harness.requestsTo("GET", WATCHLIST).length, { timeout: 10000 }).toBe(2);
         await syncFinished(page);
         expect(harness.requestsTo("POST", `${SERVER}/watchlist/gone`)).toHaveLength(1);
     });
@@ -412,7 +439,7 @@ test.describe("Reddit fails for one user: logged, the others still synced, retri
 
             // Not retried at once on the next page load...
             await harness.open("/");
-            await expect.poll(() => harness.requestsTo("GET", `${SERVER}/watchlist`).length, { timeout: 10000 }).toBe(2);
+            await expect.poll(() => harness.requestsTo("GET", WATCHLIST).length, { timeout: 10000 }).toBe(2);
             await syncFinished(page);
             expect(harness.requestsTo("GET", SUBMITTED("broken"))).toHaveLength(reads);
         });

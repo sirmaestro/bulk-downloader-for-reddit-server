@@ -86,6 +86,27 @@ def test_retry_on_server_timeout(mock_sleep: MagicMock, arctic_shift: ArcticShif
     assert [c.args[0] for c in mock_sleep.call_args_list] == [10, 6]
 
 
+@patch("bdfr.arctic_shift.time.sleep")
+def test_every_attempt_is_reported(mock_sleep: MagicMock, arctic_shift: ArcticShift):
+    reported = []
+    arctic_shift.on_request = reported.append
+    arctic_shift.session.get.side_effect = [
+        make_response(status=422, error="Timeout. Maybe slow down a bit"),
+        make_response([make_post("a", 100)]),
+        make_response([make_post("b", 100, "https://www.reddit.com/gallery/b")]),
+    ]
+    assert [s.id for s in arctic_shift.submissions(author="someone", limit=1)] == ["a"]
+    gallery = {**make_post("b", 100, "https://www.reddit.com/gallery/b"), "bdfr_note": "removed"}
+    assert [s.id for s in arctic_shift.submissions_from_posts([gallery])] == ["b"]
+    assert [(r["endpoint"], r["attempt"], r["status"], r["error"], r["posts"]) for r in reported] == [
+        ("posts/search", 1, 422, "Timeout. Maybe slow down a bit", None),
+        ("posts/search", 2, 200, None, 1),
+        ("posts/ids", 1, 200, None, 1),
+    ]
+    assert reported[0]["detail"] == "author=someone, limit=1"
+    assert reported[2]["lookups"] == {"gallery (removed)": 1}
+
+
 def test_bad_request_raises(arctic_shift: ArcticShift):
     arctic_shift.session.get.return_value = make_response(status=400, error="'limit' must be between 1 and 100")
     with pytest.raises(ArcticShiftError):

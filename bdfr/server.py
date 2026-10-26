@@ -73,6 +73,20 @@ DASHBOARD_HEADERS = {
 }
 
 
+POST_PATHS = (
+    "/jobs",
+    "/known",
+    "/watchlist/gone",
+    "/watchlist/reddit",
+    "/watchlist/continue",
+    "/watchlist/stop",
+    "/retries/stop",
+)
+# What the dashboard's Folders tab counts as videos and images (anything else, e.g. text from self posts, as other)
+VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".m4v", ".avi"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif", ".heic", ".tiff"}
+
+
 class Job:
     def __init__(
         self,
@@ -85,6 +99,7 @@ class Job:
         after: Optional[int] = None,
         retry: bool = False,
         scheduled: bool = False,
+        limit_bytes: Optional[int] = None,
     ):
         self.id = job_id
         self.folder = folder
@@ -102,6 +117,8 @@ class Job:
         self.retry = retry
         # Queued by serve itself (the watchlist's archive checks, retries), so it waits behind the userscript's jobs
         self.scheduled = scheduled
+        # With a user: stop the listing once this many bytes were written (the user's storage limit, or the disk's)
+        self.limit_bytes = limit_bytes
         # Called with the job once it has finished, whatever the outcome (used by the scheduler)
         self.on_finish: Optional[Callable[["Job"], None]] = None
         self.state = "queued"
@@ -110,6 +127,11 @@ class Job:
         self.results: dict[str, str] = {}
         # When the newest post the job went through was posted (used by the scheduler to notice quiet users)
         self.newest_post: Optional[float] = None
+        # Bytes written; why the listing stopped early ("limit": limit_bytes, "dead": its media was gone), and the
+        # oldest listing post it went through, where a whole-archive read stopped at its limit carries on
+        self.bytes_written = 0
+        self.stop_reason: Optional[str] = None
+        self.oldest_post: Optional[float] = None
         self.created = time.time()
         self.started: Optional[float] = None
         self.finished: Optional[float] = None
@@ -141,6 +163,8 @@ class Job:
                 "state": self.state,
                 "error": self.error,
                 "counts": dict(self.counts),
+                "bytes_written": self.bytes_written,
+                "stop_reason": self.stop_reason,
                 "results": dict(self.results),
             }
 
@@ -158,6 +182,8 @@ class DownloadServer:
         self.retries = None
         # Where problems are sent (bdfr/notifier.py), with --notify
         self.notifier = None
+        # Every request jobs make to Arctic Shift (bdfr/request_log.py), when serve keeps that record
+        self.requests = None
         # serve_log.txt, which GET /log reads, when serve logs to a file
         self.log_path: Optional[Path] = None
         self.started = time.time()
@@ -309,7 +335,12 @@ class DownloadServer:
         if after is not None and user is None:
             raise ValueError("'after' needs a 'user'")
         full = payload.get("archive") == "all"
-        job = Job(secrets.token_hex(6), folder, posts, user, full, before, after, retry, scheduled)
+        limit_bytes = payload.get("limit_bytes")
+        if limit_bytes is not None and (
+            not isinstance(limit_bytes, int) or isinstance(limit_bytes, bool) or limit_bytes <= 0 or user is None
+        ):
+            raise ValueError("'limit_bytes' must be a positive number of bytes, with a 'user'")
+        job = Job(secrets.token_hex(6), folder, posts, user, full, before, after, retry, scheduled, limit_bytes)
         job.on_finish = on_finish
         if posts and self.scheduler is not None and not retry and not scheduled:
             # Posts read from Reddit by the userscript wake hibernating watched users (the scheduler's own jobs, queued
@@ -336,11 +367,72 @@ class DownloadServer:
         self.scheduler.note_gone(user, payload.get("gone"))
         return {"user": user, "gone": payload.get("gone")}
 
+    def _watched_user(self, payload) -> str:
+        if self.scheduler is None:
+            raise ValueError("serve has no watchlist")
+        user = payload.get("user") if isinstance(payload, dict) else None
+        if not isinstance(user, str) or not USER_PATTERN.fullmatch(user):
+            raise ValueError("'user' must be a Reddit username")
+        return user
+
+    def note_reddit_read(self, payload: dict) -> dict:
+        """POST /watchlist/reddit: the userscript read a watched user's Reddit listing to its end ("oldest": the
+        time of its oldest post), so their whole archive may be read now"""
+        user = self._watched_user(payload)
+        oldest = payload.get("oldest")
+        if oldest is not None and (isinstance(oldest, bool) or not isinstance(oldest, (int, float))):
+            raise ValueError("'oldest' must be a time in seconds since 1970")
+        return self.scheduler.note_reddit_read(user, oldest)
+
+    def continue_archive(self, payload: dict) -> dict:
+        """POST /watchlist/continue: {"user", "limit_gb"} raises the storage limit of a user whose whole-archive read
+        stopped at it, so it carries on (the dashboard's Continue)"""
+        user = self._watched_user(payload)
+        limit = payload.get("limit_gb")
+        if isinstance(limit, bool) or not isinstance(limit, (int, float)) or limit <= 0:
+            raise ValueError("'limit_gb' must be a positive number")
+        return self.scheduler.continue_archive(user, limit)
+
+    def stop_archive(self, payload: dict) -> dict:
+        """POST /watchlist/stop: {"user"} stops a user's whole-archive read for good, leaving the weekly checks (the
+        dashboard's Stop; Continue undoes it)"""
+        return self.scheduler.stop_archive(self._watched_user(payload))
+
+    def stop_retrying(self, payload: dict) -> dict:
+        """POST /retries/stop: {"folder", "id"} gives up on a post on the retry list (the dashboard's Stop)"""
+        if self.retries is None:
+            raise ValueError("serve keeps no retry list")
+        folder, post_id = (payload.get(key) if isinstance(payload, dict) else None for key in ("folder", "id"))
+        if not isinstance(folder, str) or not isinstance(post_id, str):
+            raise ValueError("Give the post's 'folder' and 'id'")
+        return self.retries.stop(folder, post_id)
+
     def watchlist(self) -> dict:
         """The watched users with their baseline state, for GET /watchlist (the userscript's background sync)"""
         if self.scheduler is None:
             return {"users": [], "enabled": False}
         return self.scheduler.snapshot()
+
+    def user_info(self, name: str) -> dict:
+        """GET /user?name=: for the userscript's panel on a user's page: the user's /watchlist entry (None when not
+        watched; a suspended or deleted user left out of the sync is its "gone" entry) and what their folder holds (None
+        before anything is downloaded). Reads only the one folder."""
+        if not USER_PATTERN.fullmatch(name):
+            raise ValueError("'name' must be a Reddit user name")
+        watched = None
+        if self.scheduler is not None:
+            snapshot = self.scheduler.snapshot()
+            same = (entry for entry in snapshot["users"] + snapshot["gone"] if entry["name"].lower() == name.lower())
+            watched = next(same, None)
+        folder = (watched or {}).get("folder") or self._folder({"folder": name})
+        directory = self.root / folder
+        return {
+            "name": name,
+            "watchlist": self.scheduler is not None,
+            "watched": watched,
+            "folder": folder,
+            "downloads": self._file_counts(directory) if directory.is_dir() else None,
+        }
 
     def notify(self, message: str):
         """Sends a problem to --notify's URL, if one is set"""
@@ -368,6 +460,12 @@ class DownloadServer:
             "notify": self.notifier is not None,
             "log": str(self.log_path) if self.log_path else None,
         }
+
+    def request_summary(self) -> dict:
+        """GET /requests: the requests jobs made to Arctic Shift, counted by why"""
+        if self.requests is None:
+            return {"enabled": False}
+        return {"enabled": True, **self.requests.summary()}
 
     def retry_list(self) -> dict:
         """GET /retries: every post on the retry list"""
@@ -402,9 +500,9 @@ class DownloadServer:
         return {"path": str(self.log_path), "entries": entries[-lines:]}
 
     def folders(self) -> dict:
-        """GET /folders: each folder under the root with what its hash store holds (files hashed, links stored, posts
-        recorded as duplicates, unavailable or incomplete) and its posts on the retry list. Reads every folder's store,
-        so the dashboard only asks for it when shown."""
+        """GET /folders: each folder under the root with its files (count, bytes, videos, images), what its hash store
+        holds (files hashed, links stored, posts recorded as duplicates, unavailable or incomplete) and its posts on the
+        retry list. Reads every folder and its store, so the dashboard only asks for it when shown."""
         retries: dict[str, int] = {}
         for entry in self.retries.listing() if self.retries else ():
             retries[entry["folder"].lower()] = retries.get(entry["folder"].lower(), 0) + 1
@@ -418,9 +516,34 @@ class DownloadServer:
         folders = []
         for directory in directories:
             details = {"name": directory.name, "retries": retries.get(directory.name.lower(), 0)}
+            details.update(self._file_counts(Path(directory.path)))
             details.update(self._store_counts(Path(directory.path)))
             folders.append(details)
         return {"folders": folders}
+
+    @staticmethod
+    def _file_counts(directory: Path) -> dict:
+        """The folder's downloads (not BDFR's own files), its subfolders included: how many, their total size, how many
+        are videos and images, and how many posts they're from (a post's several files differ only in their index,
+        `_1`, `_2`, ..., whatever the file scheme)"""
+        counts = {"file_count": 0, "bytes": 0, "videos": 0, "images": 0, "posts": 0}
+        posts = set()
+        for folder, _subfolders, names in os.walk(directory):
+            for name in names:
+                if HashStore._is_own_file(name):
+                    continue
+                try:
+                    size = os.stat(os.path.join(folder, name)).st_size
+                except OSError:
+                    continue
+                suffix = os.path.splitext(name)[1].lower()
+                counts["file_count"] += 1
+                counts["bytes"] += size
+                counts["videos"] += suffix in VIDEO_SUFFIXES
+                counts["images"] += suffix in IMAGE_SUFFIXES
+                posts.add((folder, re.sub(r"_\d+$", "", os.path.splitext(name)[0])))
+        counts["posts"] = len(posts)
+        return counts
 
     @staticmethod
     def _store_counts(directory: Path) -> dict:
@@ -488,10 +611,6 @@ class DownloadServer:
                 json.dump({"posts": job.posts}, file)
                 post_file = Path(file.name)
             args.post_json = [str(post_file)]
-            if not job.user and self.scheduler is not None:
-                # Archive checks off for the folder's user (the watchlist's default): Arctic Shift isn't asked for
-                # anything, not even the data of single posts
-                args.archive_lookups = self.scheduler.archive_lookups(job.folder)
             if job.retry:
                 # The posts' data is what the first job had, so the archive has nothing to add
                 args.archive_lookups = False
@@ -505,6 +624,12 @@ class DownloadServer:
             args.stop_at_existing = 0 if full else (args.stop_at_existing or 5)
             args.listing_before = job.before
             args.listing_after = job.after
+            if job.full_archive:
+                # The whole archive, newest first, until two pages in a row have under 10% of their media left
+                # (older posts are then very likely gone too), rather than a run of unavailable posts
+                args.stop_at_unavailable = 0
+                args.stop_at_dead_pages = 2
+            args.stop_at_bytes = job.limit_bytes or 0
 
         job.state = "running"
         started = job.started = time.time()
@@ -517,9 +642,14 @@ class DownloadServer:
             # Its lines go to serve_log.txt with the server's, so it opens no log file of its own
             downloader = Downloader(args, log_file=False)
             downloader.progress_callback = job.record
+            if self.requests is not None:
+                downloader.arctic_shift.on_request = lambda entry: self._record_request(job, entry)
             failed_posts = downloader.failed_posts
             downloader.download()
             job.newest_post = downloader.newest_post
+            job.bytes_written = downloader.bytes_written
+            job.stop_reason = downloader.stop_reason
+            job.oldest_post = downloader.oldest_listed
             if downloader.errors:
                 # A listing stopped part way (e.g. Arctic Shift unavailable) must not look like nothing new
                 error = "; ".join(downloader.errors)
@@ -551,6 +681,25 @@ class DownloadServer:
                     job.on_finish(job)
                 except Exception:
                     logger.exception("Handling the end of the job failed")
+
+    def _record_request(self, job: Job, entry: dict):
+        entry.update(job=job.id, folder=job.folder, user=job.user, purpose=self._purpose(job))
+        self.requests.record(entry)
+
+    @staticmethod
+    def _purpose(job: Job) -> str:
+        """Why a job asks Arctic Shift for anything, for the record of requests"""
+        if job.retry:
+            return "retry of failed posts"
+        if job.scheduled and job.user:
+            if job.full_archive:
+                return "watchlist: whole archive"
+            return "watchlist: weekly check"
+        if job.scheduled:
+            return "watchlist: removed gallery lookups"
+        if job.user:
+            return "Download: whole archive" if job.full_archive else "Download: new posts in archive"
+        return "userscript posts: lookups"
 
     @staticmethod
     def _options(args: Configuration) -> str:
@@ -654,8 +803,15 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
                 self._send(200, server.recent_jobs())
             elif self.path == "/retries":
                 self._send(200, server.retry_list())
+            elif self.path == "/requests":
+                self._send(200, server.request_summary())
             elif self.path == "/folders":
                 self._send(200, server.folders())
+            elif url.path == "/user":
+                try:
+                    self._send(200, server.user_info(parse_qs(url.query).get("name", [""])[0]))
+                except ValueError as e:
+                    self._send(400, {"error": str(e)})
             elif url.path == "/log":
                 lines = parse_qs(url.query).get("lines", ["500"])[0]
                 if not lines.isdigit():
@@ -671,7 +827,7 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
         def do_POST(self):
             if not self._authorised():
                 return
-            if self.path not in ("/jobs", "/known", "/watchlist/gone"):
+            if self.path not in POST_PATHS:
                 self._send(404, {"error": "Not found"})
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -684,6 +840,14 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
                     self._send(200, server.known_posts(payload))
                 elif self.path == "/watchlist/gone":
                     self._send(200, server.note_gone(payload))
+                elif self.path == "/watchlist/reddit":
+                    self._send(200, server.note_reddit_read(payload))
+                elif self.path == "/watchlist/continue":
+                    self._send(200, server.continue_archive(payload))
+                elif self.path == "/watchlist/stop":
+                    self._send(200, server.stop_archive(payload))
+                elif self.path == "/retries/stop":
+                    self._send(200, server.stop_retrying(payload))
                 else:
                     self._send(202, server.submit(payload).to_dict())
             except (ValueError, json.JSONDecodeError) as e:
@@ -736,10 +900,16 @@ def run_server(base_args: Configuration, port: int):
     watchlist = Path(base_args.watchlist).expanduser() if base_args.watchlist else config_directory / "watchlist.yaml"
     server.scheduler = BaselineScheduler(server, watchlist)
     server.scheduler.start()
-    from bdfr.retries import RetryList
+    from bdfr.request_log import RequestLog
 
-    server.retries = RetryList(server, config_directory / "failed_posts.json")
-    server.retries.start()
+    server.requests = RequestLog(config_directory / "arctic_shift_requests.jsonl")
+    if base_args.retry_failed:
+        from bdfr.retries import RetryList
+
+        server.retries = RetryList(server, config_directory / "failed_posts.json")
+        server.retries.start()
+    else:
+        logger.info("Failed posts aren't retried (--retry-failed is off)")
     logger.info(f"Watched users are read from {watchlist}" + ("" if watchlist.exists() else " (not there yet)"))
     host = base_args.host or "127.0.0.1"
     httpd = ThreadingHTTPServer((host, port), make_handler(server))

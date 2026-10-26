@@ -1,4 +1,4 @@
-// Runs bdfr-export.user.js in Chromium as Tampermonkey would, without the network: old.reddit pages are fixture
+// Runs bdfr-export.user.js in Chromium as Tampermonkey would, without the network: Reddit pages are fixture
 // HTML, every other page request is blocked, and GM_xmlhttpRequest (Reddit's JSON, bdfr serve) is answered by
 // routes defined in the test, which can also fail (HTTP errors, redirects to the login page, network errors,
 // timeouts). Requests nothing answers are recorded and fail the test.
@@ -32,7 +32,7 @@ class Harness {
         await this.context.exposeBinding("__bdfrGm", (_source, details) => this._answer(details));
         await this.context.addInitScript(({ initial }) => {
             // Also runs in the blank page a new tab starts with, which has no storage
-            if (location.hostname !== "old.reddit.com") return;
+            if (!["old.reddit.com", "www.reddit.com"].includes(location.hostname)) return;
             // GM_* values live in the origin's localStorage, so tabs share them as they do in Tampermonkey
             if (!localStorage.getItem("__gmSeeded")) {
                 for (const [key, value] of Object.entries(initial)) localStorage.setItem(`gm:${key}`, JSON.stringify(value));
@@ -58,7 +58,8 @@ class Harness {
         }, { initial: this.gm });
         await this.context.route("**/*", (route) => {
             const url = new URL(route.request().url());
-            const html = url.hostname === "old.reddit.com" && this.pages[url.pathname];
+            // Pages are keyed by path on old.reddit.com, and by origin and path on www.reddit.com
+            const html = url.hostname === "old.reddit.com" ? this.pages[url.pathname] : this.pages[url.origin + url.pathname];
             if (html && route.request().resourceType() === "document") {
                 return route.fulfill({ status: 200, contentType: "text/html", body: html });
             }
@@ -93,7 +94,12 @@ class Harness {
         this.on("GET", new RegExp(`^${SERVER}/jobs$`), { json: { jobs: [] } });
         this.serve("GET", "/jobs/job1", { json: { id: "job1", state: "done", ...counts(), results: {} } });
         this.serve("GET", "/watchlist", { json: { enabled: true, users: [] } });
+        // The panel's line on the page's user
+        this.on("GET", new RegExp(`^${SERVER}/user\\?`), (request) => ({
+            json: { name: new URL(request.url).searchParams.get("name"), watchlist: true, watched: null, folder: "someone", downloads: null },
+        }));
         this.serve("POST", "/watchlist/gone", (request) => ({ json: request.data }));
+        this.serve("POST", "/watchlist/reddit", (request) => ({ json: { user: request.data.user, reddit_read: 1 } }));
         return this;
     }
 
@@ -131,9 +137,9 @@ class Harness {
         return { kind: "error", response: { status: 0, error: "no route in the test", finalUrl: request.url } };
     }
 
-    async open(pathname = "/user/someone/submitted/?sort=new") {
+    async open(pathname = "/user/someone/submitted/?sort=new", origin = "https://old.reddit.com") {
         const page = await this.context.newPage();
-        await page.goto(`https://old.reddit.com${pathname}`);
+        await page.goto(`${origin}${pathname}`);
         await page.addScriptTag({ content: SCRIPT });
         return page;
     }
@@ -161,4 +167,7 @@ function parse(data) {
     }
 }
 
-module.exports = { Harness, fixture, counts, SERVER };
+// GET /watchlist itself, not /watchlist/gone or /watchlist/reddit
+const WATCHLIST = new RegExp(`^${SERVER}/watchlist$`);
+
+module.exports = { Harness, fixture, counts, SERVER, WATCHLIST };

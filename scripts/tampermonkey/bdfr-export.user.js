@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.14
-// @description  Downloads the posts on old.reddit pages through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
+// @version      4.15
+// @description  Downloads the posts on old.reddit pages (also www.reddit.com in the old design) through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
+// @match        https://www.reddit.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -21,12 +22,13 @@
 (function () {
     "use strict";
 
-    // Which pages the panel appears on. On other pages the script does nothing.
+    // Which pages the panel appears on (old.reddit.com, or www.reddit.com in the old design). On other pages, and on
+    // www.reddit.com in the new design, there is no panel; the link rewriting and background sync still run.
     const SETTINGS = {
         userPages: true, // old.reddit.com/user/<name>/...
-        subredditPages: false, // old.reddit.com/r/<name>/...
+        subredditPages: false, // old.reddit.com/r/<name>/... and multireddits (old.reddit.com/user/<name>/m/<multi>)
         // Links to a user's profile open their submitted posts, newest first, on every old.reddit page
-        userLinksToSubmitted: true,
+        userLinksToSubmitted: true, // on www.reddit.com too, in either design
         // On any old.reddit page, watched users (bdfr serve's watchlist.yaml) not synced for this many hours have their
         // newest posts read from Reddit with your login and sent to bdfr serve, in the background
         backgroundSync: true,
@@ -63,8 +65,10 @@
             clearTimeout(timer);
             timer = setTimeout(() => rewriteAll(document), 300);
         }).observe(document.body, { childList: true, subtree: true });
+        // (composedPath: in the new design a link can be inside a component's shadow root, which the event's target
+        // hides)
         document.addEventListener("mousedown", (event) => {
-            const link = event.target.closest && event.target.closest("a[href]");
+            const link = event.composedPath().find((node) => node instanceof Element && node.matches("a[href]"));
             if (link) rewrite(link);
         }, true);
     }
@@ -87,7 +91,7 @@
     const COLLECTING_KEY = "bdfr-collecting";
     const SERVER_KEY = "bdfr-server";
     const TOKEN_KEY = "bdfr-token";
-    const ARCHIVE_KEY = "bdfr-full-archive";
+    const EXTRAS_KEY = "bdfr-extras-open";
     const DEFAULT_SERVER = "http://127.0.0.1:7635";
     // How often the panel asks bdfr serve what it's doing (GET /jobs), while the tab is visible
     const ACTIVITY_EVERY_MS = 10 * 1000;
@@ -358,17 +362,26 @@
     }
 
     // Reads the user's newest posts until SYNC_STOP_AFTER_KNOWN downloaded ones in a row, and sends the new ones.
-    // Returns how many were sent, and when the user's newest post (of any kind) was made.
+    // When bdfr serve asks for it (read_reddit_to_end: the user's whole archive is still to be read), reads the
+    // listing to its end instead (Reddit lists the newest 1000 posts) and then tells it so, so the archive is only read
+    // for what Reddit can't show. Returns how many were sent, and when the user's newest post (of any kind) was made.
     async function syncUser(user) {
         const target = user.folder || user.name;
+        const toEnd = Boolean(user.read_reddit_to_end);
         const pending = [];
         let after = null;
         let knownInARow = 0;
         let newest = null;
+        let oldest = null;
+        let reachedEnd = false;
         for (let pageNumber = 0; pageNumber < SYNC_MAX_PAGES; pageNumber++) {
             const listing = await readSubmitted(user.name, after);
             if (pageNumber === 0 && listing.children.length) {
                 newest = (listing.children[0].data || {}).created_utc || null;
+            }
+            for (const child of listing.children) {
+                const created = (child && child.data || {}).created_utc;
+                if (Number.isFinite(created) && (oldest === null || created < oldest)) oldest = created;
             }
             const posts = listing.children.map((child) => postFromListing(child && child.data)).filter(Boolean);
             let stop = false;
@@ -385,16 +398,24 @@
                     if (!had.has(post.id)) {
                         knownInARow = 0;
                         pending.push(post);
-                    } else if (++knownInARow >= SYNC_STOP_AFTER_KNOWN) {
+                    } else if (++knownInARow >= SYNC_STOP_AFTER_KNOWN && !toEnd) {
                         stop = true;
                         break;
                     }
                 }
             }
-            if (stop || !listing.after) break;
+            if (stop) break;
+            if (!listing.after || pageNumber === SYNC_MAX_PAGES - 1) {
+                reachedEnd = true;
+                break;
+            }
             after = listing.after;
         }
         if (pending.length) await request("POST", "/jobs", { folder: target, posts: pending });
+        if (toEnd && reachedEnd) {
+            await request("POST", "/watchlist/reddit", { user: user.name, oldest });
+            console.info(`BDFR sync: u/${user.name}: Reddit read to its end; bdfr serve reads the rest from the archive`);
+        }
         return { sent: pending.length, newest };
     }
 
@@ -537,20 +558,30 @@
         });
     }
 
-    const page = pageSource();
+    const page = newDesign() ? null : pageSource();
     if (!page) return;
 
     const collected = GM_getValue(STORE_KEY, {});
     const state = {}; // post ID -> "new" | "existing" | "skipped" | "fetching" | "ignored"
     const ignoredWhy = {}; // post ID -> why it isn't sent
     let collecting = GM_getValue(COLLECTING_KEY, false);
-    let fullArchive = GM_getValue(ARCHIVE_KEY, false);
     let galleryNote = ""; // why galleries couldn't be read from Reddit, shown with the job's progress
     let saveTimer = null;
     let refreshTimer = null;
     let polling = null;
 
+    // www.reddit.com in the new design (unless Reddit's preferences ask for the old one), whose page has no .thing
+    // elements to read posts from
+    function newDesign() {
+        return location.hostname !== "old.reddit.com"
+            && Boolean(document.querySelector("shreddit-app, #SHORTCUT_FOCUSABLE_DIV"));
+    }
+
     function pageSource() {
+        // A user's multireddit lists other people's posts, like a subreddit page with several subreddits
+        if (/^\/u(?:ser)?\/[\w-]+\/m(\/|$)/i.test(location.pathname)) {
+            return SETTINGS.subredditPages ? { kind: "subreddit", user: null, folder: null } : null;
+        }
         const user = location.pathname.match(/^\/u(?:ser)?\/([\w-]+)/i);
         if (user) return SETTINGS.userPages ? { kind: "user", user: user[1], folder: user[1] } : null;
         const subreddit = location.pathname.match(/^\/r\/([\w+]+)/i);
@@ -865,6 +896,7 @@
         GM_setValue(TOKEN_KEY, token.trim());
         refreshKnown();
         refreshActivity();
+        refreshUser();
         return true;
     }
 
@@ -923,7 +955,7 @@
     // Downloads the page's posts that aren't downloaded yet. On a user page it also reads the user's archive (Arctic
     // Shift) when the page may not have everything new: when it's empty (e.g. the user's posts are hidden or removed
     // on Reddit), or its oldest post isn't downloaded yet, so there may be more beyond it. The archive is then read
-    // until 5 already-downloaded posts in a row; with Archive ticked, always and all of it.
+    // until 5 already-downloaded posts in a row.
     async function download() {
         if (preparing) return;
         if (!GM_getValue(TOKEN_KEY, "") && !configure()) return;
@@ -932,18 +964,16 @@
         preparing = true;
         try {
             const posts = await postsToSend();
-            const readArchive = Boolean(page.user) && (fullArchive || !pageReachesDownloaded());
+            const readArchive = Boolean(page.user) && !pageReachesDownloaded();
             if (!posts.length && !readArchive) return setStatus("Nothing new on this page");
             const body = { folder: target, posts };
             let note = "";
             if (readArchive) {
                 body.user = page.user;
-                if (fullArchive) body.archive = "all";
                 // The page's posts are already in hand, so the archive is only read below the oldest of them
                 const oldest = oldestOwnPost(false);
                 if (oldest && oldest.created_utc) body.before = oldest.created_utc;
-                note = (fullArchive ? "and the whole archive" : "and newer posts from the archive")
-                    + (body.before ? " before it" : "");
+                note = "and newer posts from the archive" + (body.before ? " before it" : "");
             }
             await startJob(body, note);
         } finally {
@@ -1056,38 +1086,39 @@
     const exportButton = button("Export", "Save the collected posts as JSON for bdfr download --post-json",
         exportPosts);
     const clearButton = button("Clear", "Forget the collected posts", clearCollected);
+    // Collecting for Export (bdfr download --post-json) is rarely needed, so it's tucked away; the row stays open
+    // (remembered) until Extras is clicked again
+    let extrasOpen = GM_getValue(EXTRAS_KEY, false);
+    const extras = document.createElement("div");
+    extras.className = "bdfr-extras";
+    extras.style.cssText = "flex-basis:100%;gap:4px;align-items:center;flex-wrap:wrap";
+    extras.append(collectButton, exportButton, clearButton);
+    const extrasButton = button("", "Collect posts across pages and export them as JSON", () => {
+        extrasOpen = !extrasOpen;
+        GM_setValue(EXTRAS_KEY, extrasOpen);
+        updateButtons();
+    });
     buttons.append(button("Download", page.user
         ? "Download the posts on this page that aren't downloaded yet. If the page is empty or its oldest post isn't "
             + "downloaded yet, newer posts are also read from the archive until already-downloaded ones."
         : "Download the posts on this page that aren't downloaded yet", download));
-    if (page.user) buttons.append(archiveToggle());
-    buttons.append(collectButton, exportButton, clearButton,
+    buttons.append(
         button("Sync", "Sync every watched user (bdfr serve's watchlist) from Reddit now, as the background sync does "
             + `every ${SETTINGS.syncEveryHours} hours`, syncNow),
         button("Status", "bdfr serve's recent jobs, queue, failed posts waiting for a retry and watchlist problems",
             toggleServerView),
-        button("⚙", "bdfr serve address and token", configure));
+        button("Dashboard", "Open bdfr serve's dashboard in a new tab", openDashboard),
+        button("⚙", "bdfr serve address and token", configure),
+        extrasButton, extras);
 
-    // Ticked: every Download also goes through the user's whole archive (Arctic Shift), finding posts removed from
-    // Reddit or older than the last download. Already-downloaded posts cost no requests, so this costs the listing
-    // itself, about one request per 60-200 posts.
-    function archiveToggle() {
-        const label = document.createElement("label");
-        label.className = "bdfr-archive";
-        label.title = "Also read this user's whole archive on Arctic Shift, including posts removed from Reddit. "
-            + "About one request per 60-200 archived posts.";
-        label.style.cssText = `display:flex;align-items:center;gap:3px;cursor:pointer;color:${COLOURS.textStrong}`;
-        const box = document.createElement("input");
-        box.type = "checkbox";
-        box.checked = fullArchive;
-        box.style.cssText = "margin:0;cursor:pointer";
-        box.addEventListener("change", () => {
-            fullArchive = box.checked;
-            GM_setValue(ARCHIVE_KEY, fullArchive);
-        });
-        label.append(box, "Archive");
-        return label;
+    // The dashboard asks for the token once; it's handed over in the address's fragment, which isn't sent to the
+    // server, and the dashboard removes it from the address at once
+    function openDashboard() {
+        const server = GM_getValue(SERVER_KEY, DEFAULT_SERVER);
+        const token = GM_getValue(TOKEN_KEY, "");
+        window.open(`${server}/` + (token ? `#token=${encodeURIComponent(token)}` : ""), "_blank", "noopener");
     }
+
     const status = document.createElement("div");
     // What bdfr serve is doing: the running job, and how many wait behind it
     const activity = document.createElement("div");
@@ -1097,7 +1128,12 @@
     serverView.className = "bdfr-server-view";
     serverView.style.cssText = `display:none;border-top:1px solid ${COLOURS.raised};padding-top:3px;`
         + "max-height:360px;overflow-y:auto";
-    panel.append(buttons, status, activity, serverView);
+    // On a user page: whether bdfr serve watches the user (watchlist.yaml), and what their folder holds
+    const watch = document.createElement("div");
+    watch.className = "bdfr-watch";
+    const downloads = document.createElement("div");
+    downloads.className = "bdfr-downloads";
+    panel.append(buttons, status, activity, watch, downloads, serverView);
     document.body.appendChild(panel);
 
     let serverViewTimer = null;
@@ -1128,6 +1164,68 @@
     document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible" && !activityTimer && !activityBusy) refreshActivity();
     });
+
+    // Shows whether the page's user is on bdfr serve's watchlist, and what their folder holds, read once as the page
+    // loads (GET /user). A failure shows nothing here (request() logs it, and the activity line says when bdfr serve
+    // is down); an older bdfr serve without it (404) neither.
+    async function refreshUser() {
+        if (!page.user || !GM_getValue(TOKEN_KEY, "")) return;
+        let info;
+        try {
+            info = await request("GET", `/user?name=${encodeURIComponent(page.user)}`);
+        } catch (error) {
+            watch.textContent = downloads.textContent = "";
+            return;
+        }
+        const [text, colour, tip] = describeWatch(info);
+        watch.textContent = text;
+        watch.style.color = colour;
+        watch.title = tip;
+        downloads.textContent = describeDownloads(info);
+        downloads.title = `In the folder ${info.folder} under bdfr serve's directory`;
+    }
+
+    // e.g. "Watched · folder other · hibernating · whole archive read", "Watched as an old account of u/new", or
+    // "Not watched", with its colour and tooltip
+    function describeWatch(info) {
+        const none = "Add them to watchlist.yaml in BDFR's config folder to keep their folder up to date";
+        if (!info.watchlist) return ["Not watched: bdfr serve has no watchlist", COLOURS.text, none];
+        const user = info.watched;
+        if (!user) return ["Not watched", COLOURS.text, none];
+        const tip = "On bdfr serve's watchlist: synced from Reddit in the background, and read from the archive";
+        // Left out of the sync until its recheck
+        if (user.recheck) return [`Watched · ${user.gone} on Reddit, not synced for now`, COLOURS.text, tip];
+        const parts = [user.alias_of ? `Watched as an old account of u/${user.alias_of}` : "Watched"];
+        if (user.folder && user.folder.toLowerCase() !== info.name.toLowerCase()) parts.push(`folder ${user.folder}`);
+        if (!user.alias_of) {
+            if (user.gone) parts.push(`${user.gone} on Reddit`);
+            else if (user.hibernating) parts.push("hibernating (no recent posts)");
+            if (user.full_archive_done) parts.push("whole archive read");
+            else if (user.full_archive_stopped) parts.push("whole archive not read (stopped)");
+            else if (user.full_archive_capped) parts.push("archive read stopped at its storage limit");
+            else parts.push("archive not read in full yet");
+            if (user.last_error) parts.push(`last check failed: ${user.last_error}`);
+        }
+        return [parts.join(" · "), user.last_error ? MARKS.failed[1] : MARKS.new[1], tip];
+    }
+
+    // e.g. "312 posts · 1,204 files (980 images, 224 videos) · 41.2 GB"
+    function describeDownloads(info) {
+        const d = info.downloads;
+        if (!d || !d.file_count) return "Nothing downloaded yet";
+        const count = (n, word) => `${Number(n || 0).toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+        return `${count(d.posts, "post")} · ${count(d.file_count, "file")} `
+            + `(${count(d.images, "image")}, ${count(d.videos, "video")}) · ${formatBytes(d.bytes)}`;
+    }
+
+    // As the dashboard shows sizes
+    function formatBytes(bytes) {
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let value = bytes || 0;
+        let unit = 0;
+        for (; value >= 1000 && unit < units.length - 1; unit++) value /= 1000;
+        return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+    }
 
     function describeActivity(jobs) {
         const running = jobs.find((job) => job.state === "running");
@@ -1335,12 +1433,17 @@
         collectButton.textContent = collecting ? `Collecting (${count})` : "Collect";
         collectButton.style.color = collecting ? MARKS.new[1] : COLOURS.textStrong;
         exportButton.style.display = clearButton.style.display = count ? "" : "none";
+        extras.style.display = extrasOpen ? "flex" : "none";
+        extrasButton.textContent = (extrasOpen ? "Extras ▾" : "Extras ▸") + (collecting && !extrasOpen ? " ●" : "");
+        extrasButton.title = collecting && !extrasOpen ? `Collecting posts (${count}) for Export`
+            : "Collect posts across pages and export them as JSON";
     }
 
     updateButtons();
     if (collecting) collect();
     refreshKnown();
     refreshActivity();
+    refreshUser();
     // Never Ending Reddit and RES add posts after load
     new MutationObserver((mutations) => {
         const addedPosts = mutations.some((mutation) => [...mutation.addedNodes].some((node) =>

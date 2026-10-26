@@ -18,7 +18,7 @@ import pytest
 
 from bdfr.__main__ import SERVE_DEFAULTS
 from bdfr.configuration import Configuration
-from bdfr.scheduler import BaselineScheduler
+from bdfr.scheduler import GB, BaselineScheduler
 from bdfr.server import DownloadServer, make_handler
 from tests.mock_arctic_shift import MockArcticShift
 
@@ -31,6 +31,10 @@ class FakeDownloader:
     errors_to_report = []
     newest_post = None
     gate = None  # a threading.Event the run waits for, to hold a job running
+    # What the next runs report: bytes written, why the listing stopped early, the oldest listing post reached
+    bytes_written = 0
+    stop_reason = None
+    oldest_listed = None
 
     def __init__(self, args: Configuration, log_file: bool = True):
         self.log_file = log_file
@@ -38,6 +42,9 @@ class FakeDownloader:
         self.progress_callback = None
         self.errors = list(FakeDownloader.errors_to_report)
         self.newest_post = FakeDownloader.newest_post
+        self.bytes_written = FakeDownloader.bytes_written
+        self.stop_reason = FakeDownloader.stop_reason
+        self.oldest_listed = FakeDownloader.oldest_listed
         self.failed_posts = {}
 
     def download(self):
@@ -65,20 +72,31 @@ def serve(tmp_path: Path):
     FakeDownloader.gate = None
     FakeDownloader.errors_to_report = []
     FakeDownloader.newest_post = None
+    FakeDownloader.bytes_written, FakeDownloader.stop_reason, FakeDownloader.oldest_listed = 0, None, None
     with patch("bdfr.server.Downloader", FakeDownloader):
         yield DownloadServer(Configuration(), tmp_path / "root", "token")
 
 
-def write_watchlist(path: Path, text: str, archive_checks: bool = True):
-    """Writes the watchlist; most tests are about archive checks, which are off by default, so they're turned on
-    unless the text sets archive_checks itself or archive_checks=False"""
-    if archive_checks and "archive_checks:" in text:
-        archive_checks = False
-    path.write_text(("archive_checks: true\n" if archive_checks else "") + text, encoding="utf-8")
+def write_watchlist(path: Path, text: str):
+    path.write_text(text, encoding="utf-8")
 
 
-def make_scheduler(serve: DownloadServer, tmp_path: Path, clock: Clock) -> BaselineScheduler:
-    return BaselineScheduler(serve, tmp_path / "watchlist.yaml", clock=clock)
+FREE = 500 * GB
+
+
+def make_scheduler(
+    serve: DownloadServer, tmp_path: Path, clock: Clock, reddit_read: bool = True, free: float = FREE
+) -> BaselineScheduler:
+    """The scheduler, seeing `free` bytes free on the disk. With reddit_read, the userscript has read every watched
+    user's Reddit listing to its end (unless the saved state says otherwise), so whole-archive reads may start."""
+    scheduler = BaselineScheduler(serve, tmp_path / "watchlist.yaml", clock=clock)
+    scheduler._free_bytes = lambda: free
+    if reddit_read:
+        scheduler._reload()
+        for user in scheduler.users:
+            if "alias_of" not in user:
+                scheduler.state.setdefault(user["name"].lower(), {}).setdefault("reddit_read", clock())
+    return scheduler
 
 
 def settle(serve: DownloadServer):
@@ -108,6 +126,7 @@ def test_first_run_reads_whole_archive_then_weekly_window(serve, tmp_path, clock
     tick(scheduler, serve)
     first = FakeDownloader.runs[-1]
     assert first.user == ["someone"] and first.stop_at_existing == 0 and first.listing_after is None
+    assert first.stop_at_dead_pages == 2 and first.stop_at_bytes == 10 * GB
     assert Path(first.directory).name == "someone"
 
     clock.now += 6 * DAY
@@ -141,10 +160,16 @@ def test_settings_and_folders(serve, tmp_path, clock):
         {
             "name": "someone",
             "folder": "Some Folder",
-            "archive": True,
             "full_archive_done": START,
+            "full_archive_capped": None,
+            "full_archive_stopped": None,
+            "archive_bytes": 0,
+            "archive_limit_gb": 10,
+            "reddit_read": START,
+            "read_reddit_to_end": False,
             "last_success": START + 2 * DAY,
             "last_error": None,
+            "checked": True,
             "next_check": START + 4 * DAY,
             "newest_post": None,
             "hibernating": False,
@@ -261,72 +286,174 @@ def test_userscript_jobs_run_before_scheduled_jobs(serve, tmp_path, clock):
     assert [Path(run.directory).name for run in FakeDownloader.runs] == ["first", "second", "watched"]
 
 
-def test_archive_checks_are_off_by_default(serve, tmp_path, clock):
-    write_watchlist(tmp_path / "watchlist.yaml", "users: [someone, other]\n", archive_checks=False)
-    scheduler = make_scheduler(serve, tmp_path, clock)
+def test_whole_archive_waits_for_the_userscript_to_read_reddit_to_its_end(serve, tmp_path, clock, caplog):
+    write_watchlist(tmp_path / "watchlist.yaml", "users:\n  - someone\n  - name: other\n    aliases: [old]\n")
+    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock, reddit_read=False)
     for _ in range(3):
         tick(scheduler, serve)
         clock.now += 30 * DAY
     assert FakeDownloader.runs == []
+    users = {user["name"]: user for user in scheduler.snapshot()["users"]}
+    assert users["someone"]["read_reddit_to_end"] is True and users["someone"]["next_check"] is None
+    assert users["old"]["read_reddit_to_end"] is False  # an alias isn't synced
+    with caplog.at_level(logging.INFO):
+        assert serve.note_reddit_read({"user": "Someone", "oldest": START - 400 * DAY})["user"] == "someone"
+    assert "u/someone's Reddit listing was read to its end" in caplog.text
+    tick(scheduler, serve)
+    assert [(run.user, run.listing_after) for run in FakeDownloader.runs] == [(["someone"], None)]
     user = scheduler.snapshot()["users"][0]
-    assert user["archive"] is False and user["next_check"] is None
+    assert user["read_reddit_to_end"] is False and user["full_archive_done"] == clock.now
+    assert scheduler.state["someone"]["reddit_oldest"] == START - 400 * DAY
+    for payload, error in (
+        ({"user": "old"}, "isn't on the watchlist"),
+        ({"user": "bad name"}, "Reddit username"),
+        ({"user": "someone", "oldest": "yesterday"}, "seconds"),
+    ):
+        with pytest.raises(ValueError, match=error):
+            serve.note_reddit_read(payload)
 
 
-def test_userscript_posts_are_looked_up_in_the_archive_only_with_archive_checks(serve, tmp_path, clock):
-    watchlist = tmp_path / "watchlist.yaml"
-    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock)
+def test_userscript_posts_are_always_looked_up_but_retries_never(serve, tmp_path, clock):
+    write_watchlist(tmp_path / "watchlist.yaml", "users:\n  - someone\n  - name: new_account\n    aliases: [old]\n")
+    serve.scheduler = make_scheduler(serve, tmp_path, clock, reddit_read=False)
     post = {"id": "abc0001", "url": "https://www.reddit.com/gallery/abc0001"}
-
-    def lookups(payload: dict) -> bool:
+    for payload in ({"folder": "someone", "posts": [post]}, {"folder": "old", "posts": [post]}):
         serve.submit(payload)
-        settle(serve)
-        return FakeDownloader.runs[-1].archive_lookups
-
-    assert lookups({"folder": "someone", "posts": [post]})  # no watchlist file: as before
-    text = "users:\n  - someone\n  - name: keen\n    archive: true\n  - name: new_account\n    aliases: [old]\n"
-    write_watchlist(watchlist, text, archive_checks=False)
-    tick(scheduler, serve)
-    FakeDownloader.runs.clear()
-    assert not lookups({"folder": "someone", "posts": [post]})
-    assert not lookups({"folder": "old", "posts": [post]})  # an alias: its account's folder
-    assert not lookups({"folder": "unwatched", "posts": [post]})
-    assert lookups({"folder": "keen", "posts": [post]})
-    assert lookups({"folder": "someone", "user": "someone", "posts": [post]})  # reads the archive anyway
-    write_watchlist(watchlist, text)  # archive_checks: true
-    tick(scheduler, serve)
-    FakeDownloader.runs.clear()
-    assert lookups({"folder": "unwatched", "posts": [post]})
+    serve.submit({"folder": "unwatched", "posts": [post]}, retry=True)
+    settle(serve)
+    assert [run.archive_lookups for run in FakeDownloader.runs] == [True, True, False]
 
 
-def test_archive_true_with_a_baseline_reads_windows_and_archive_all_reads_the_whole_archive_once(
-    serve, tmp_path, clock
-):
-    write_watchlist(
-        tmp_path / "watchlist.yaml",
-        "users:\n  - someone\n  - name: wanted\n    archive: true\n  - name: full\n    archive: all\n",
-        archive_checks=False,
-    )
-    # Checked before (e.g. seeded), but never read in full
+def test_users_with_windows_but_no_whole_archive_get_it_read(serve, tmp_path, clock):
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [seeded]\n")
+    # Checked before (e.g. seeded, or from before every watched user's archive was read), but never read in full
     seeded = {"last_attempt": START - 8 * DAY, "last_success": START - 8 * DAY, "window_end": START - 8 * DAY}
-    (tmp_path / "watchlist_state.json").write_text(
-        json.dumps({"users": {"wanted": dict(seeded), "full": dict(seeded)}}), encoding="utf-8"
-    )
+    (tmp_path / "watchlist_state.json").write_text(json.dumps({"users": {"seeded": seeded}}), encoding="utf-8")
     scheduler = make_scheduler(serve, tmp_path, clock)
     tick(scheduler, serve)
-    clock.now += 120
-    tick(scheduler, serve)
-    wanted, full = FakeDownloader.runs
-    # wanted: a window from the baseline, not the whole archive
-    assert wanted.user == ["wanted"] and wanted.listing_after == START - 15 * DAY
-    assert full.user == ["full"] and full.listing_after is None and full.stop_at_existing == 0
-    users = {user["name"]: user for user in scheduler.snapshot()["users"]}
-    assert users["full"]["full_archive_done"] == START + 120 and users["wanted"]["full_archive_done"] is None
+    assert FakeDownloader.runs[-1].listing_after is None and FakeDownloader.runs[-1].stop_at_dead_pages == 2
+    assert scheduler.snapshot()["users"][0]["full_archive_done"] == START
     clock.now += 7 * DAY
     tick(scheduler, serve)
-    clock.now += 120
+    assert FakeDownloader.runs[-1].listing_after == START - 7 * DAY  # windows from the whole read on
+
+
+def test_storage_limit_pauses_the_whole_archive_until_raised(serve, tmp_path, clock, caplog):
+    caplog.set_level(logging.INFO)
+    write_watchlist(tmp_path / "watchlist.yaml", "archive_limit_gb: 2\nusers: [big]\n")
+    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock)
+    serve.notifier = MagicMock()
+    FakeDownloader.bytes_written, FakeDownloader.stop_reason = int(2.1 * GB), "limit"
+    FakeDownloader.oldest_listed = START - 200 * DAY
     tick(scheduler, serve)
-    assert [run.user for run in FakeDownloader.runs] == [["wanted"], ["full"], ["wanted"], ["full"]]
-    assert FakeDownloader.runs[-1].listing_after == START + 120 - 7 * DAY  # full: windows from now on
+    assert FakeDownloader.runs[-1].stop_at_bytes == 2 * GB
+    assert "u/big's whole-archive read stopped at its storage limit (2.1 of 2 GB)" in caplog.text
+    serve.notifier.notify.assert_called_once()
+    user = scheduler.snapshot()["users"][0]
+    assert user["full_archive_done"] is None and user["full_archive_capped"] == START
+    assert user["archive_bytes"] == int(2.1 * GB) and user["next_check"] == START + 7 * DAY
+
+    # Meanwhile the weekly windows run, from where the whole read began
+    FakeDownloader.bytes_written, FakeDownloader.stop_reason = 0, None
+    clock.now += 7 * DAY
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].listing_after == START - 7 * DAY
+    assert FakeDownloader.runs[-1].stop_at_bytes == FREE - 50 * GB  # windows only stop near min_free_gb
+
+    for limit, error in ((2, "over the 2.1 GB already written"), (0, "positive"), ("5", "positive")):
+        with pytest.raises(ValueError, match=error):
+            serve.continue_archive({"user": "big", "limit_gb": limit})
+    assert serve.continue_archive({"user": "Big", "limit_gb": 5}) == {"user": "big", "archive_limit_gb": 5}
+    clock.now += BaselineScheduler.PAUSE_SECONDS
+    tick(scheduler, serve)
+    rest = FakeDownloader.runs[-1]
+    # Carries on below the oldest post reached, with what's left of the new limit
+    assert rest.listing_before == START - 200 * DAY + 1 and rest.listing_after is None
+    assert rest.stop_at_bytes == 5 * GB - int(2.1 * GB)
+    user = scheduler.snapshot()["users"][0]
+    assert user["full_archive_done"] == clock.now and user["archive_limit_gb"] == 5
+    assert scheduler.state["big"]["window_end"] == START + 7 * DAY  # the continuation didn't move the windows
+    assert "full_archive_before" not in scheduler.state["big"]
+    with pytest.raises(ValueError, match="already been read"):
+        serve.continue_archive({"user": "big", "limit_gb": 50})
+
+
+def test_a_stopped_whole_archive_leaves_only_weekly_windows_until_continued(serve, tmp_path, clock, caplog):
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [seeded, fresh]\n")
+    seeded = {"last_attempt": START - 8 * DAY, "last_success": START - 8 * DAY, "window_end": START - 8 * DAY}
+    (tmp_path / "watchlist_state.json").write_text(json.dumps({"users": {"seeded": seeded}}), encoding="utf-8")
+    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock)
+    with caplog.at_level(logging.INFO):
+        assert serve.stop_archive({"user": "Seeded"}) == {"user": "seeded", "full_archive_stopped": START}
+    assert "u/seeded's whole-archive read is stopped" in caplog.text
+    serve.stop_archive({"user": "fresh"})
+    assert serve.stop_archive({"user": "fresh"})["full_archive_stopped"] == START  # stopping again changes nothing
+    tick(scheduler, serve)
+    clock.now += BaselineScheduler.PAUSE_SECONDS
+    tick(scheduler, serve)
+    # The window since the previous check, not the whole archive; a user without windows starts them when stopped
+    assert [(run.user, run.listing_after) for run in FakeDownloader.runs] == [
+        (["seeded"], START - 15 * DAY),
+        (["fresh"], START - 7 * DAY),
+    ]
+    users = {user["name"]: user for user in scheduler.snapshot()["users"]}
+    assert users["fresh"]["full_archive_stopped"] == START and users["fresh"]["next_check"] == clock.now + 7 * DAY
+    assert users["seeded"]["read_reddit_to_end"] is False and users["seeded"]["full_archive_done"] is None
+    assert json.loads((tmp_path / "watchlist_state.json").read_text())["users"]["seeded"]["full_archive_stopped"]
+
+    # Continue reads the whole archive after all
+    serve.continue_archive({"user": "seeded", "limit_gb": 20})
+    clock.now += BaselineScheduler.PAUSE_SECONDS
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].listing_after is None and FakeDownloader.runs[-1].stop_at_bytes == 20 * GB
+    assert scheduler.snapshot()["users"][0]["full_archive_done"] == clock.now
+    for payload, error in (({"user": "seeded"}, "already been read"), ({"user": "nobody"}, "isn't on the watchlist")):
+        with pytest.raises(ValueError, match=error):
+            serve.stop_archive(payload)
+
+
+def test_no_archive_is_read_while_the_disk_is_nearly_full(serve, tmp_path, clock, caplog):
+    write_watchlist(tmp_path / "watchlist.yaml", "min_free_gb: 100\nusers: [someone]\n")
+    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock, free=80 * GB)
+    serve.notifier = MagicMock()
+    with caplog.at_level(logging.WARNING):
+        tick(scheduler, serve)
+        clock.now += BaselineScheduler.PAUSE_SECONDS
+        tick(scheduler, serve)
+    assert FakeDownloader.runs == [] and caplog.text.count("Only 80 GB free") == 1
+    serve.notifier.notify.assert_called_once()
+    assert scheduler.snapshot()["low_disk"] is True
+    # With room again: the whole read may write up to the room left above min_free_gb
+    scheduler._free_bytes = lambda: 103 * GB
+    FakeDownloader.bytes_written, FakeDownloader.stop_reason = 3 * GB, "limit"
+    FakeDownloader.oldest_listed = START - 100 * DAY
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].stop_at_bytes == 3 * GB
+    assert scheduler.snapshot()["low_disk"] is False
+    # Stopped by the disk, not the user's storage limit: no Continue needed, it carries on below where it got to
+    user = scheduler.snapshot()["users"][0]
+    assert user["full_archive_capped"] is None and user["full_archive_done"] is None and user["archive_bytes"] == 3 * GB
+    FakeDownloader.bytes_written, FakeDownloader.stop_reason = 0, None
+    scheduler._free_bytes = lambda: 200 * GB
+    clock.now += BaselineScheduler.PAUSE_SECONDS
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].listing_before == START - 100 * DAY + 1
+    assert FakeDownloader.runs[-1].stop_at_bytes == 7 * GB
+
+
+def test_a_window_stopped_by_a_full_disk_is_read_again(serve, tmp_path, clock):
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
+    scheduler = make_scheduler(serve, tmp_path, clock)
+    tick(scheduler, serve)  # the whole archive
+    clock.now += 7 * DAY
+    FakeDownloader.stop_reason = "limit"
+    tick(scheduler, serve)
+    user = scheduler.snapshot()["users"][0]
+    assert user["last_error"] == "stopped: the disk is nearly full" and user["last_success"] == START
+    FakeDownloader.stop_reason = None
+    clock.now += DAY
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].listing_after == START - 7 * DAY  # the same window
 
 
 def write_removed_galleries(folder: Path, keys: dict):
@@ -336,11 +463,7 @@ def write_removed_galleries(folder: Path, keys: dict):
 
 
 def test_known_removed_galleries_are_looked_up_by_id_without_reading_the_archive(serve, tmp_path, clock):
-    write_watchlist(
-        tmp_path / "watchlist.yaml",
-        "users:\n  - name: quiet\n    archive: true\n    aliases: [oldquiet]\n  - plain\n",
-        archive_checks=False,
-    )
+    write_watchlist(tmp_path / "watchlist.yaml", "users:\n  - name: quiet\n    aliases: [oldquiet]\n  - plain\n")
     # quiet hibernates, with a baseline: no window is read, only the removed galleries by ID
     old = {"newest_post": START - 300 * DAY, "window_end": START - 30 * DAY, "last_success": START - 30 * DAY}
     (tmp_path / "watchlist_state.json").write_text(json.dumps({"users": {"quiet": old}}), encoding="utf-8")
@@ -351,22 +474,25 @@ def test_known_removed_galleries_are_looked_up_by_id_without_reading_the_archive
         "https://i.redd.it/y.jpg": "0123",
     }
     write_removed_galleries(tmp_path / "root" / "quiet", removed)
-    write_removed_galleries(tmp_path / "root" / "plain", removed)  # no archive checks: never looked up
-    scheduler = make_scheduler(serve, tmp_path, clock)
+    write_removed_galleries(tmp_path / "root" / "plain", removed)
+    # plain hasn't had its Reddit listing read to the end: no listing yet, but its removed galleries are looked up
+    scheduler = make_scheduler(serve, tmp_path, clock, reddit_read=False)
     serve.scheduler = scheduler
     tick(scheduler, serve)
-    job = next(iter(serve.jobs.values()))
-    assert job.folder == "quiet" and job.user is None and job.scheduled
-    assert job.posts == [{"id": "gal0001"}, {"id": "gal0002"}]
+    clock.now += BaselineScheduler.PAUSE_SECONDS
+    tick(scheduler, serve)
+    jobs = sorted(serve.jobs.values(), key=lambda job: job.created)
+    assert [(job.folder, job.user, job.scheduled) for job in jobs] == [("quiet", None, True), ("plain", None, True)]
+    assert jobs[0].posts == [{"id": "gal0001"}, {"id": "gal0002"}]
     assert FakeDownloader.runs[-1].archive_lookups is True
 
     # Looked at again only after retry_hours
     clock.now += 23 * 3600
     tick(scheduler, serve)
-    assert len(FakeDownloader.runs) == 1
+    assert len(FakeDownloader.runs) == 2
     clock.now += 2 * 3600
     tick(scheduler, serve)
-    assert len(FakeDownloader.runs) == 2
+    assert len(FakeDownloader.runs) == 3
 
 
 def test_removed_galleries_of_a_user_with_windows_are_looked_up_first(serve, tmp_path, clock):
@@ -382,35 +508,28 @@ def test_removed_galleries_of_a_user_with_windows_are_looked_up_first(serve, tmp
     assert listing.user == "someone" and listing.full_archive  # no baseline: the whole archive
 
 
-def test_own_archive_true_is_read_once_even_while_hibernating(serve, tmp_path, clock):
-    write_watchlist(
-        tmp_path / "watchlist.yaml",
-        "users:\n  - name: banned\n    archive: true\n  - name: quiet\n",
-        archive_checks=True,
-    )
-    old = {"newest_post": START - 300 * DAY}
+def test_hibernating_users_get_no_whole_archive_read(serve, tmp_path, clock):
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [quiet]\n")
     (tmp_path / "watchlist_state.json").write_text(
-        json.dumps({"users": {"banned": dict(old), "quiet": dict(old)}}), encoding="utf-8"
+        json.dumps({"users": {"quiet": {"newest_post": START - 300 * DAY}}}), encoding="utf-8"
     )
     scheduler = make_scheduler(serve, tmp_path, clock)
     for _ in range(3):
         tick(scheduler, serve)
         clock.now += 8 * DAY
-    # banned: its whole archive once, then hibernating like everyone else; quiet (archive from archive_checks): never
-    assert [run.user for run in FakeDownloader.runs] == [["banned"]]
+    assert FakeDownloader.runs == []
 
 
-def test_archive_false_overrides_archive_checks_and_bad_values_warn(serve, tmp_path, clock, caplog):
+def test_settings_from_before_are_warned_about_and_ignored(serve, tmp_path, clock, caplog):
     write_watchlist(
         tmp_path / "watchlist.yaml",
-        "archive_checks: maybe\nusers:\n  - name: skipped\n    archive: false\n  - name: odd\n    archive: sometimes\n",
+        "archive_checks: false\nusers:\n  - name: skipped\n    archive: false\n  - name: odd\n    archive: all\n",
     )
     with caplog.at_level(logging.WARNING):
         scheduler = make_scheduler(serve, tmp_path, clock)
         tick(scheduler, serve)
-    assert "'archive_checks' must be true or false" in caplog.text
-    assert "u/odd's 'archive' must be true, false or all" in caplog.text
-    assert FakeDownloader.runs == []
+    assert "'archive_checks' and 'archive' on users are no longer used" in caplog.text
+    assert [run.user for run in FakeDownloader.runs] == [["skipped"]]  # checked like everyone else
 
 
 def test_one_scheduled_job_at_a_time(serve, tmp_path, clock):
@@ -457,12 +576,15 @@ def test_never_successful_user_retries_whole_archive(serve, tmp_path, clock):
     write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
     scheduler = make_scheduler(serve, tmp_path, clock)
     FakeDownloader.errors_to_report = ["Stopped"]
+    FakeDownloader.bytes_written = 2 * GB
     tick(scheduler, serve)
     FakeDownloader.errors_to_report = []
     FakeDownloader.newest_post = None
     clock.now += DAY
     tick(scheduler, serve)
     assert FakeDownloader.runs[-1].listing_after is None and FakeDownloader.runs[-1].stop_at_existing == 0
+    # What the failed read wrote counts towards the storage limit
+    assert FakeDownloader.runs[-1].stop_at_bytes == 8 * GB
 
 
 def test_state_survives_restart(serve, tmp_path, clock):
@@ -580,7 +702,9 @@ def test_gone_users_are_left_out_and_not_checked_until_recheck(serve, tmp_path, 
     serve.notifier.notify.assert_called_once_with("u/someone is deleted on Reddit")
     snapshot = scheduler.snapshot()
     assert [user["name"] for user in snapshot["users"]] == ["other"]
-    assert snapshot["gone"] == [{"name": "someone", "gone": "deleted", "recheck": clock.now + 30 * DAY}]
+    assert snapshot["gone"] == [
+        {"name": "someone", "folder": "someone", "gone": "deleted", "recheck": clock.now + 30 * DAY}
+    ]
     tick(scheduler, serve)
     assert [run.user for run in FakeDownloader.runs] == [["other"]]  # no archive checks for someone
 
@@ -597,8 +721,8 @@ def test_gone_users_are_left_out_and_not_checked_until_recheck(serve, tmp_path, 
 
 
 def test_posts_from_reddit_bring_a_gone_user_back(serve, tmp_path, clock):
-    write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n", archive_checks=False)
-    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock)
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
+    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock, reddit_read=False)
     scheduler.note_gone("someone", "suspended")
     assert scheduler.snapshot()["users"] == []
     # Posts from before the report (e.g. saved earlier and sent in bulk) don't show the account is back

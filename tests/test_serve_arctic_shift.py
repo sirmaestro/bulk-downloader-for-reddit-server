@@ -13,9 +13,9 @@ import pytest
 
 from bdfr.__main__ import SERVE_DEFAULTS
 from bdfr.configuration import Configuration
+from bdfr.downloader import Downloader
 from bdfr.resource import TEMP_PREFIX, TEMP_SUFFIX, Resource
 from bdfr.retries import HOUR, RetryList
-from bdfr.scheduler import BaselineScheduler
 from bdfr.server import DownloadServer, Job
 from bdfr.site_downloaders.base_downloader import BaseDownloader
 from bdfr.site_downloaders.download_factory import DownloadFactory
@@ -76,6 +76,21 @@ def test_user_job_downloads_from_the_archive(serve: DownloadServer, archive: Moc
     assert archive.endpoint_requests("posts/ids") == []
     # The scheduler's measure of how quiet the user is
     assert job.newest_post == NOW
+
+
+def test_requests_are_recorded_with_their_purpose(serve: DownloadServer, archive: MockArcticShift, tmp_path: Path):
+    from bdfr.request_log import RequestLog
+
+    serve.requests = RequestLog(tmp_path / "requests.jsonl")
+    for number in range(5):
+        archive.add_post(f"abc000{number}", NOW - number * 100)
+    job = run(serve, {"folder": "someone", "user": "someone", "archive": "all"})
+    assert job.state == "done", job.error
+    recorded = serve.request_summary()["recent"]
+    assert len(recorded) == len(archive.endpoint_requests("posts/search"))
+    assert {(e["purpose"], e["job"], e["user"], e["endpoint"]) for e in recorded} == {
+        ("Download: whole archive", job.id, "someone", "posts/search")
+    }
 
 
 @pytest.mark.parametrize(
@@ -151,14 +166,12 @@ def test_failed_lookup_of_given_posts_fails_the_job(serve: DownloadServer, archi
     assert "Arctic Shift" in job.error
 
 
-def test_posts_for_users_without_archive_checks_are_not_looked_up(
-    serve: DownloadServer, archive: MockArcticShift, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_removed_gallery_without_lookups_is_unavailable_until_it_has_its_image_list(
+    serve: DownloadServer, archive: MockArcticShift, monkeypatch: pytest.MonkeyPatch
 ):
-    """A gallery Reddit dropped the image list of is unavailable (removed) instead of being looked up in the archive,
-    and isn't tried again until it comes with its image list"""
-    (tmp_path / "watchlist.yaml").write_text("users: [someone]\n", encoding="utf-8")
-    serve.scheduler = BaselineScheduler(serve, tmp_path / "watchlist.yaml")
-    serve.scheduler.tick()
+    """Without archive lookups (retries), a gallery Reddit dropped the image list of is unavailable (removed), and
+    isn't tried again until it comes with its image list"""
+    serve.base_args.archive_lookups = False
     archive.add_post("abc0001", NOW, url="https://www.reddit.com/gallery/abc0001")
     post = dict(archive.posts["abc0001"], removed_by_category="moderator")
     post.pop("gallery_data", None)
@@ -178,13 +191,13 @@ def test_posts_for_users_without_archive_checks_are_not_looked_up(
 
 def test_listing_stops_after_a_run_of_unavailable_posts(serve: DownloadServer, archive: MockArcticShift):
     """A user who deleted their older posts: once their media has been gone for --stop-at-unavailable posts in a row,
-    the rest of the archive isn't read"""
+    the rest of the listing isn't read"""
     serve.base_args.stop_at_unavailable = 3
     archive.add_post("new0001", NOW)
     for number in range(8):
         archive.add_post(f"old000{number}", NOW - 100 - number)
         del archive.media[f"old000{number}.jpg"]
-    job = run(serve, {"folder": "someone", "user": "someone", "archive": "all"})
+    job = run(serve, {"folder": "someone", "user": "someone"})
     assert job.state == "done"
     assert job.results == {
         "new0001": "new",
@@ -194,6 +207,35 @@ def test_listing_stops_after_a_run_of_unavailable_posts(serve: DownloadServer, a
     }
     # Pages of 3: the third (old0005 and older) is never fetched
     assert len(archive.endpoint_requests("posts/search")) == 2
+
+
+def test_whole_archive_stops_after_two_dead_pages(
+    serve: DownloadServer, archive: MockArcticShift, monkeypatch: pytest.MonkeyPatch
+):
+    """A whole-archive read goes on through stretches of dead media, and stops once two pages in a row have under
+    10% of their media left"""
+    serve.base_args.stop_at_unavailable = 3  # whole-archive reads don't stop at a run of unavailable posts
+    monkeypatch.setattr(Downloader, "DEAD_PAGE_POSTS", 3)
+    archive.add_post("new0001", NOW)
+    for number in range(12):
+        archive.add_post(f"old{number:04}", NOW - 100 - number)
+        del archive.media[f"old{number:04}.jpg"]
+    job = run(serve, {"folder": "someone", "user": "someone", "archive": "all"})
+    assert job.state == "done" and job.stop_reason == "dead"
+    # Pages of 3: new0001 keeps the first alive (1 of 3); the next two are dead, so old0008 on aren't reached
+    assert list(job.results) == ["new0001"] + [f"old{number:04}" for number in range(8)]
+    # The mock's pages of 3 overlap by one post: 3 + 2 + 2 + 2 posts, and old0010 on are never fetched
+    assert len(archive.endpoint_requests("posts/search")) == 4
+
+
+def test_whole_archive_stops_at_the_storage_limit(serve: DownloadServer, archive: MockArcticShift):
+    for number in range(4):
+        archive.add_post(f"abc{number:04}", NOW - number * 100)
+    job = run(serve, {"folder": "someone", "user": "someone", "archive": "all", "limit_bytes": 1})
+    assert job.state == "done" and job.stop_reason == "limit"
+    assert job.results == {"abc0000": "new"}
+    assert job.bytes_written == (serve.root / "someone" / files(serve, "someone")[0]).stat().st_size
+    assert job.oldest_post == NOW
 
 
 @pytest.mark.parametrize("store", ("db", "json"))

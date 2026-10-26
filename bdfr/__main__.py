@@ -193,6 +193,12 @@ SERVE_DEFAULTS = {
     help="URL to POST problems to (failed jobs, watched users gone, failed posts given up), e.g. an ntfy topic "
     "such as https://ntfy.sh/<topic>. Also read from BDFR_NOTIFY.",
 )
+@click.option(
+    "--retry-failed",
+    is_flag=True,
+    default=None,
+    help="Keep posts that failed and try them again after 1 h, 6 h, 1, 3 and 7 days (off by default).",
+)
 @click.help_option("-h", "--help")
 @click.pass_context
 def cli_serve(context: click.Context, **_):

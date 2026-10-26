@@ -1,6 +1,9 @@
-// The dashboard of `bdfr serve` (served at /): reads GET /status, /jobs, /jobs/<id>, /watchlist, /retries, /folders
-// and /log with the token from this browser's storage. It only reads what serve already holds, so it never makes serve
-// ask Arctic Shift for anything. Everything from the server is shown as text (textContent), never as HTML.
+// The dashboard of `bdfr serve` (served at /): reads GET /status, /jobs, /jobs/<id>, /watchlist, /requests, /retries,
+// /folders and /log with the token from this browser's storage. Reading only shows what serve already holds, so it never makes
+// serve ask Arctic Shift for anything. Three buttons change something: Continue raises a user's storage limit (POST
+// /watchlist/continue; the scheduler then carries on reading their archive), Stop on a user ends their whole-archive
+// read for good (POST /watchlist/stop; weekly checks go on), and Stop on a post on the retry list gives up on it
+// (POST /retries/stop). Everything from the server is shown as text (textContent), never as HTML.
 "use strict";
 
 const TOKEN_KEY = "bdfr-dashboard-token";
@@ -30,6 +33,14 @@ function storageSet(key, value) {
 }
 
 let token = storageGet(TOKEN_KEY);
+// The userscript's Dashboard button hands the token over in the fragment (never sent to the server); it's kept like a
+// typed one and taken out of the address and history at once
+const handedOver = new URLSearchParams(location.hash.slice(1)).get("token");
+if (handedOver) {
+  token = handedOver.trim();
+  storageSet(TOKEN_KEY, token);
+  history.replaceState(null, "", location.pathname + location.search);
+}
 const saved = (() => {
   try {
     return JSON.parse(storageGet(STATE_KEY) || "{}") || {};
@@ -43,6 +54,7 @@ const state = {
   jobs: [],
   watchlist: null,
   watchlistAt: 0,
+  requests: null,
   retries: null,
   folders: null,
   log: null,
@@ -136,6 +148,39 @@ async function api(path) {
   return body;
 }
 
+async function apiPost(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "X-BDFR-Token": token || "", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (response.status === 401) throw new Unauthorised();
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+
+// Runs a change on the server, then shows the new state; a refusal is shown in the banner
+async function change(path, body) {
+  try {
+    await apiPost(path, body);
+    showBanner("");
+  } catch (e) {
+    if (e instanceof Unauthorised) return showLogin("That token was not accepted.");
+    showBanner(`Not changed: ${e.message}`);
+  }
+  refresh(true);
+}
+
+function bytes(n) {
+  if (n === null || n === undefined) return "–";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) (n /= 1000), i++;
+  return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
+}
+
 function showBanner(message) {
   const banner = $("banner");
   banner.hidden = !message;
@@ -165,6 +210,7 @@ async function refresh(force = false) {
         }),
       );
     }
+    if (state.tab === "archive") tasks.push(api("/requests").then((r) => (state.requests = r)));
     if (state.tab === "retries") tasks.push(api("/retries").then((r) => (state.retries = r)));
     if (state.tab === "log" && (force || $("log-auto").checked)) tasks.push(loadLog());
     if (state.tab === "overview") {
@@ -219,6 +265,7 @@ function render() {
   for (const view of document.querySelectorAll(".view")) view.hidden = view.id !== `view-${state.tab}`;
   if (state.tab === "overview") renderOverview();
   if (state.tab === "watchlist") renderWatchlist();
+  if (state.tab === "archive") renderArchive();
   if (state.tab === "retries") renderRetries();
   if (state.tab === "log") renderLog();
 }
@@ -434,10 +481,49 @@ function userStatus(u) {
   return badges;
 }
 
+// Where the user's whole-archive read is, with Continue when it stopped (at its storage limit, or with Stop), and Stop
+// while it's still to come
 function archiveLabel(u) {
-  if (u.archive === "all") return el("span", { class: "badge info", title: "Whole archive every check" }, "all");
-  if (u.archive) return el("span", { class: "badge info" }, u.full_archive_done ? "weekly" : "first read");
-  return el("span", { class: "muted", title: "Fed by the userscript only" }, "off");
+  if (u.alias_of) return el("span", { class: "muted" }, "–");
+  const used = `${bytes(u.archive_bytes)} of ${u.archive_limit_gb} GB`;
+  if (u.full_archive_done) return el("span", { class: "badge ok", title: `${bytes(u.archive_bytes)} written; weekly checks from now on` }, "complete");
+  const carryOn = (suggested) => {
+    const raise = () => {
+      const answer = prompt(`Storage limit for u/${u.name}'s archive, in GB (${used} used):`, String(suggested));
+      if (answer === null) return;
+      const limit = Number(answer);
+      if (!(limit > 0)) return showBanner(`Not changed: "${answer}" isn't a number of GB`);
+      change("/watchlist/continue", { user: u.name, limit_gb: limit });
+    };
+    return el("button", { onclick: raise, title: "Set the storage limit and carry on reading this user's archive" }, "Continue…");
+  };
+  if (u.full_archive_stopped) {
+    return [
+      el("span", { class: "badge", title: "Whole-archive read stopped with Stop; only weekly checks" }, "stopped"),
+      " ",
+      carryOn(u.archive_limit_gb),
+    ];
+  }
+  if (u.full_archive_capped) {
+    return [
+      el("span", { class: "badge warn", title: "Stopped at the storage limit; raise it to read the rest" }, `paused at ${used}`),
+      " ",
+      carryOn(u.archive_limit_gb * 2),
+    ];
+  }
+  const stop = () => {
+    if (!confirm(`Stop reading u/${u.name}'s whole archive? Weekly checks go on, and Continue undoes it.`)) return;
+    change("/watchlist/stop", { user: u.name });
+  };
+  const stopButton = el("button", { onclick: stop, title: "Don't read this user's whole archive; keep the weekly checks" }, "Stop");
+  if (!u.reddit_read) {
+    return [
+      el("span", { class: "muted", title: "The userscript's sync reads the user's Reddit listing to its end first" }, "waiting for userscript"),
+      " ",
+      stopButton,
+    ];
+  }
+  return [el("span", { class: "badge info", title: `${used} written so far` }, "reading"), " ", stopButton];
 }
 
 function renderWatchlist() {
@@ -448,8 +534,14 @@ function renderWatchlist() {
     fill($("watch-gone"), "");
     return fill($("watch"), el("tr", {}, el("td", { class: "empty" }, "serve has no watchlist")));
   }
-  const settings = Object.entries(w).filter(([key]) => !["users", "gone", "enabled", "error"].includes(key));
-  fill($("watch-settings"), settings.map(([key, value], i) => [i ? " · " : "", `${key} ${value}`]), w.error ? el("div", { class: "error" }, w.error) : "");
+  const settings = Object.entries(w).filter(([key]) => !["users", "gone", "enabled", "error", "free_bytes", "low_disk"].includes(key));
+  fill(
+    $("watch-settings"),
+    settings.map(([key, value], i) => [i ? " · " : "", `${key} ${value}`]),
+    w.free_bytes != null ? ` · ${bytes(w.free_bytes)} free` : "",
+    w.low_disk ? el("div", { class: "error" }, `Archive reads are paused: under min_free_gb (${w.min_free_gb} GB) free`) : "",
+    w.error ? el("div", { class: "error" }, w.error) : "",
+  );
 
   const filter = $("watch-filter").value.trim().toLowerCase();
   const users = w.users.filter((u) => !filter || `${u.name} ${u.folder} ${u.alias_of || ""} ${u.last_error || ""}`.toLowerCase().includes(filter));
@@ -480,7 +572,7 @@ function renderWatchlist() {
               el("td", {}, archiveLabel(u)),
               el("td", {}, when(u.newest_post)),
               el("td", {}, when(u.last_success), u.last_error ? el("div", { class: "error wrap" }, u.last_error) : ""),
-              el("td", {}, u.archive && !u.alias_of && !u.hibernating && !u.gone ? when(u.next_check, "due") : el("span", { class: "muted" }, "–")),
+              el("td", {}, u.checked ? when(u.next_check, "due") : el("span", { class: "muted" }, "–")),
               el("td", {}, userStatus(u)),
             ),
           )
@@ -510,6 +602,117 @@ function renderWatchlist() {
   );
 }
 
+const PERIODS = [
+  ["day", "24 h"],
+  ["week", "7 days"],
+  ["month", "30 days"],
+];
+
+// "120 (8 failed)" for one period's counts
+function requestCount(c) {
+  if (!c || !c.requests) return el("span", { class: "muted" }, "0");
+  return [String(c.requests), c.failed ? el("span", { class: "error" }, ` (${c.failed} failed)`) : ""];
+}
+
+function renderArchive() {
+  const r = state.requests;
+  const empty = (table, text, cols = 1) => fill($(table), el("tr", {}, el("td", { colspan: cols, class: "empty" }, text)));
+  if (!r || !r.enabled) {
+    for (const id of ["archive-tiles", "archive-lookups", "archive-errors", "archive-users", "archive-path"]) fill($(id), "");
+    empty("archive-recent", "");
+    return empty("archive-purposes", r ? "serve keeps no record of Arctic Shift requests" : "Loading…");
+  }
+  fill($("archive-path"), `Every request jobs made (failed attempts and retries included), kept ${r.keep_days} days in ${r.path}`, r.since ? `; since ${absolute(r.since)}` : "");
+  fill(
+    $("archive-tiles"),
+    PERIODS.map(([key, label]) => {
+      const t = r.totals[key];
+      return tile(`Requests (${label})`, t.requests, t.requests ? `${t.failed} failed (${Math.round((100 * t.failed) / t.requests)}%) · ${t.posts} posts` : "");
+    }),
+  );
+
+  const head = (first, ...rest) => el("thead", {}, el("tr", {}, el("th", {}, first), rest.map((h) => el("th", { class: "num" }, h))));
+  fill(
+    $("archive-purposes"),
+    head("Purpose", ...PERIODS.map(([, label]) => label), "Posts (30 days)"),
+    el(
+      "tbody",
+      {},
+      r.purposes.length
+        ? r.purposes.map((p) => el("tr", {}, el("td", {}, p.purpose), PERIODS.map(([key]) => el("td", { class: "num" }, requestCount(p[key]))), el("td", { class: "num" }, p.month.posts)))
+        : el("tr", {}, el("td", { colspan: 5, class: "empty" }, "No requests yet")),
+    ),
+  );
+
+  const section = (title, note, table) => [el("h2", {}, title), note ? el("p", { class: "muted" }, note) : "", el("div", { class: "table-wrap" }, el("table", { class: "data" }, table))];
+  fill(
+    $("archive-lookups"),
+    r.lookups.length
+      ? section("Posts looked up by ID", "Why given posts needed the archive's data (posts, not requests: up to 100 per request).", [
+          head("Reason", ...PERIODS.map(([, label]) => label)),
+          el("tbody", {}, r.lookups.map((l) => el("tr", {}, el("td", {}, l.reason), PERIODS.map(([key]) => el("td", { class: "num" }, l[key]))))),
+        ])
+      : null,
+  );
+  fill(
+    $("archive-errors"),
+    r.errors.length
+      ? section("Failures (7 days)", null, [
+          el("thead", {}, el("tr", {}, el("th", {}, "Answer"), el("th", { class: "num" }, "Requests"))),
+          el("tbody", {}, r.errors.map((e) => el("tr", {}, el("td", { class: "wrap error" }, e.error), el("td", { class: "num" }, e.count)))),
+        ])
+      : null,
+  );
+  fill(
+    $("archive-users"),
+    r.users.length
+      ? section("Users (7 days)", null, [
+          el("thead", {}, el("tr", {}, el("th", {}, "User"), el("th", { class: "num" }, "Requests"), el("th", {}, "Latest"))),
+          el("tbody", {}, r.users.map((u) => el("tr", {}, el("td", {}, userLink(u.user)), el("td", { class: "num" }, requestCount(u)), el("td", {}, when(u.last))))),
+        ])
+      : null,
+  );
+
+  const filter = $("archive-filter").value.trim().toLowerCase();
+  const recent = r.recent.filter((e) => !filter || `${e.purpose} ${e.user || ""} ${e.folder} ${e.job} ${e.endpoint} ${e.detail} ${e.error || ""}`.toLowerCase().includes(filter));
+  fill(
+    $("archive-recent"),
+    el("thead", {}, el("tr", {}, ["Time", "Job", "Purpose", "Request", "Answer", "Took"].map((h) => el("th", {}, h)))),
+    el(
+      "tbody",
+      {},
+      recent.length
+        ? recent.map((e) =>
+            el(
+              "tr",
+              {},
+              el("td", {}, when(e.time)),
+              el("td", {}, el("a", { href: "#", class: "mono", title: "Show this job's log lines", onclick: (ev) => (ev.preventDefault(), showJobLog(e.job)) }, e.job), el("div", { class: "muted" }, e.folder)),
+              el("td", {}, e.purpose, e.attempt > 1 ? el("span", { class: "badge warn" }, `attempt ${e.attempt}`) : ""),
+              el(
+                "td",
+                { class: "wrap" },
+                el("span", { class: "mono" }, e.endpoint),
+                " ",
+                el("span", { class: "muted" }, e.detail),
+                e.lookups ? el("div", { class: "muted" }, Object.entries(e.lookups).map(([reason, n]) => `${n} ${reason}`).join(", ")) : "",
+              ),
+              el(
+                "td",
+                {},
+                e.status === 200
+                  ? el("span", { class: "badge ok" }, `${e.posts} posts`)
+                  : el("span", { class: "badge bad", title: e.error || "" }, e.status ? `HTTP ${e.status}` : "no answer"),
+                e.status !== 200 && e.error ? el("div", { class: "error wrap" }, e.error) : "",
+              ),
+              el("td", { class: "num" }, e.seconds != null ? `${e.seconds}s` : ""),
+            ),
+          )
+        : el("tr", {}, el("td", { colspan: 6, class: "empty" }, filter ? "No matching requests" : "No requests yet")),
+    ),
+  );
+}
+
 function renderRetries() {
   const r = state.retries;
   if (!r) return fill($("retries"), el("tr", {}, el("td", { class: "empty" }, "Loading…")));
@@ -517,7 +720,7 @@ function renderRetries() {
   const posts = r.posts.filter((p) => !filter || `${p.folder} ${p.id} ${p.title || ""} ${p.error || ""} ${p.author || ""}`.toLowerCase().includes(filter));
   fill(
     $("retries"),
-    el("thead", {}, el("tr", {}, ["Folder", "Post", "Tries", "Last failure", "Next try", "Reason"].map((h) => el("th", {}, h)))),
+    el("thead", {}, el("tr", {}, ["Folder", "Post", "Tries", "Last failure", "Next try", "Reason", ""].map((h) => el("th", {}, h)))),
     el(
       "tbody",
       {},
@@ -530,11 +733,33 @@ function renderRetries() {
               el("td", { class: "wrap" }, postLink(p.id, p.id), p.title ? el("div", { class: "muted" }, p.title) : ""),
               el("td", { class: "num" }, p.attempts),
               el("td", {}, when(p.failed)),
-              el("td", {}, p.pending ? el("span", { class: "badge info" }, "queued") : p.next_try ? when(p.next_try) : el("span", { class: "badge bad" }, "given up")),
+              el(
+                "td",
+                {},
+                p.pending
+                  ? el("span", { class: "badge info" }, "queued")
+                  : p.next_try
+                    ? when(p.next_try)
+                    : el("span", { class: "badge bad" }, p.stopped ? "stopped" : "given up"),
+              ),
               el("td", { class: "wrap error" }, p.error || ""),
+              el(
+                "td",
+                {},
+                p.next_try && !p.pending
+                  ? el(
+                      "button",
+                      {
+                        title: "Don't retry this post any more",
+                        onclick: () => confirm(`Stop retrying post ${p.id} in ${p.folder}?`) && change("/retries/stop", { folder: p.folder, id: p.id }),
+                      },
+                      "Stop",
+                    )
+                  : "",
+              ),
             ),
           )
-        : el("tr", {}, el("td", { colspan: 6, class: "empty" }, r.enabled ? (filter ? "No matching posts" : "Nothing to retry") : "serve keeps no retry list")),
+        : el("tr", {}, el("td", { colspan: 7, class: "empty" }, r.enabled ? (filter ? "No matching posts" : "Nothing to retry") : "serve keeps no retry list")),
     ),
   );
 }
@@ -545,6 +770,11 @@ function renderFolders() {
   if (f.error) return fill($("folders"), el("tr", {}, el("td", { class: "empty error" }, f.error)));
   const columns = [
     ["Folder", "name"],
+    ["Size", "bytes", "num"],
+    ["Avg file", "avg", "num"],
+    ["Posts", "posts", "num"],
+    ["Videos", "videos", "num"],
+    ["Images", "images", "num"],
     ["Store", "store"],
     ["Files", "files", "num"],
     ["Links", "links", "num"],
@@ -553,7 +783,8 @@ function renderFolders() {
     ["Incomplete", "incomplete", "num"],
     ["Retrying", "retries", "num"],
   ];
-  const sorted = sortBy(f.folders, state.folderSort, (row, key) => (key === "name" ? row.name.toLowerCase() : row[key]));
+  const average = (row) => (row.file_count ? row.bytes / row.file_count : null);
+  const sorted = sortBy(f.folders, state.folderSort, (row, key) => (key === "name" ? row.name.toLowerCase() : key === "avg" ? average(row) : row[key]));
   const cell = (value, cls) => el("td", { class: `num ${cls || ""}` }, value ?? "–");
   fill(
     $("folders"),
@@ -567,6 +798,11 @@ function renderFolders() {
               "tr",
               {},
               el("td", {}, row.name),
+              el("td", { class: "num", title: `${row.file_count ?? 0} files` }, bytes(row.bytes)),
+              el("td", { class: "num" }, bytes(average(row))),
+              cell(row.posts),
+              cell(row.videos),
+              cell(row.images),
               el("td", {}, row.store === "error" ? el("span", { class: "badge bad", title: row.error }, "unreadable") : row.store || el("span", { class: "muted" }, "none")),
               cell(row.files),
               cell(row.links),
@@ -576,7 +812,7 @@ function renderFolders() {
               cell(row.retries, row.retries ? "error" : ""),
             ),
           )
-        : el("tr", {}, el("td", { colspan: 8, class: "empty" }, "No folders yet")),
+        : el("tr", {}, el("td", { colspan: 12, class: "empty" }, "No folders yet")),
     ),
   );
 }
@@ -658,6 +894,7 @@ $("logout").addEventListener("click", () => {
 $("jobs-failed").addEventListener("change", renderJobs);
 $("jobs-hide-scheduled").addEventListener("change", renderJobs);
 $("watch-filter").addEventListener("input", renderWatchlist);
+$("archive-filter").addEventListener("input", renderArchive);
 $("retry-filter").addEventListener("input", renderRetries);
 $("folders-load").addEventListener("click", loadFolders);
 $("log-level").addEventListener("change", renderLog);
