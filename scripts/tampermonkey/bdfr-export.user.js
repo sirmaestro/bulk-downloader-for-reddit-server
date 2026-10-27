@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.15
+// @version      4.16
 // @description  Downloads the posts on old.reddit pages (also www.reddit.com in the old design) through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @match        https://www.reddit.com/*
@@ -135,7 +135,9 @@
     const SYNC_HIBERNATING_MS = 7 * 24 * 3600 * 1000;
     const SYNC_START_DELAY_MS = 1500;
     const SYNC_STOP_AFTER_KNOWN = 5;
-    const SYNC_MAX_PAGES = 10; // Reddit only lists a user's newest 1000 posts
+    const SYNC_PAGE_SIZE = 100; // posts per request to Reddit, its most
+    const REDDIT_LISTING_MAX = 1000; // Reddit only lists a user's newest 1000 posts
+    const SYNC_MAX_PAGES = Math.ceil(REDDIT_LISTING_MAX / SYNC_PAGE_SIZE);
     const syncTab = Math.random().toString(36).slice(2);
     let lastRedditRead = 0;
     let redditPausedUntil = 0; // Reddit's rate limit window is (nearly) used up until then
@@ -373,12 +375,14 @@
         let knownInARow = 0;
         let newest = null;
         let oldest = null;
+        let listed = 0;
         let reachedEnd = false;
         for (let pageNumber = 0; pageNumber < SYNC_MAX_PAGES; pageNumber++) {
             const listing = await readSubmitted(user.name, after);
             if (pageNumber === 0 && listing.children.length) {
                 newest = (listing.children[0].data || {}).created_utc || null;
             }
+            listed += listing.children.length;
             for (const child of listing.children) {
                 const created = (child && child.data || {}).created_utc;
                 if (Number.isFinite(created) && (oldest === null || created < oldest)) oldest = created;
@@ -405,7 +409,9 @@
                 }
             }
             if (stop) break;
-            if (!listing.after || pageNumber === SYNC_MAX_PAGES - 1) {
+            // The end: no next page, or as many posts as Reddit lists. Running out of pages before either isn't, so
+            // bdfr serve isn't told the listing was read when it wasn't.
+            if (!listing.after || listed >= REDDIT_LISTING_MAX) {
                 reachedEnd = true;
                 break;
             }
@@ -450,7 +456,7 @@
     // One page of the user's submitted posts, newest first, read with the browser's Reddit login
     async function readSubmitted(name, after) {
         const url = `https://old.reddit.com/user/${encodeURIComponent(name)}/submitted.json`
-            + "?sort=new&limit=100&raw_json=1" + (after ? `&after=${encodeURIComponent(after)}` : "");
+            + `?sort=new&limit=${SYNC_PAGE_SIZE}&raw_json=1` + (after ? `&after=${encodeURIComponent(after)}` : "");
         const data = (await readReddit(url)).data;
         if (!data || !Array.isArray(data.children)) {
             const error = new Error("Reddit didn't answer with a listing");

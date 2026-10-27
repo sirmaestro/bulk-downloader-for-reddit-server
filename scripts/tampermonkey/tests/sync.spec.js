@@ -113,6 +113,21 @@ test("reads to the end of Reddit's listing when bdfr serve asks, then reports it
     expect(harness.warnings()).toEqual([]);
 });
 
+test("running out of pages before Reddit's 1000 posts doesn't report reaching the end", async ({ context }) => {
+    await setUp(context);
+    harness.serve("GET", "/watchlist", {
+        json: { enabled: true, users: [{ name: "someone", folder: "someone folder", read_reddit_to_end: true }], gone: [] },
+    });
+    // Every page says there's another, with far fewer than 100 posts on it
+    harness.on("GET", SUBMITTED("someone"), { json: { kind: "Listing", data: { children: [], after: "t3_more" } } });
+    const page = await harness.open("/");
+    await expect.poll(() => harness.requestsTo("GET", SUBMITTED("someone")).length, { timeout: 10000 }).toBe(10);
+    await syncFinished(page);
+    expect(harness.requestsTo("GET", SUBMITTED("someone"))).toHaveLength(10);
+    expect(harness.requestsTo("POST", `${SERVER}/watchlist/reddit`)).toEqual([]);
+    expect(harness.warnings()).toEqual([]);
+});
+
 test("a sync stopped by known posts doesn't report reaching the end", async ({ context }) => {
     await setUp(context);
     watch("someone");
