@@ -143,12 +143,40 @@ class Job:
             self.counts[label] += 1
             self.results[submission_id] = label
 
+    @property
+    def origin(self) -> str:
+        """Where the job came from, for the dashboard: "retry", "watchlist" (the scheduler) or "userscript" """
+        if self.retry:
+            return "retry"
+        return "watchlist" if self.scheduled else "userscript"
+
+    @property
+    def purpose(self) -> str:
+        """Why the job asks Arctic Shift for anything, for the record of requests and the dashboard"""
+        if self.retry:
+            return "retry of failed posts"
+        if self.scheduled and self.user:
+            if self.full_archive:
+                return "watchlist: whole archive"
+            return "watchlist: weekly check"
+        if self.scheduled:
+            return "watchlist: removed gallery lookups"
+        if self.user:
+            return "Download: whole archive" if self.full_archive else "Download: new posts in archive"
+        return "userscript posts: lookups"
+
     def summary(self) -> dict:
         """The job without its per-post results, for GET /jobs"""
         details = self.to_dict()
         del details["results"]
         details.update(
-            user=self.user, scheduled=self.scheduled, created=self.created, started=self.started, finished=self.finished
+            user=self.user,
+            scheduled=self.scheduled,
+            origin=self.origin,
+            purpose=self.purpose,
+            created=self.created,
+            started=self.started,
+            finished=self.finished,
         )
         return details
 
@@ -683,23 +711,8 @@ class DownloadServer:
                     logger.exception("Handling the end of the job failed")
 
     def _record_request(self, job: Job, entry: dict):
-        entry.update(job=job.id, folder=job.folder, user=job.user, purpose=self._purpose(job))
+        entry.update(job=job.id, folder=job.folder, user=job.user, purpose=job.purpose)
         self.requests.record(entry)
-
-    @staticmethod
-    def _purpose(job: Job) -> str:
-        """Why a job asks Arctic Shift for anything, for the record of requests"""
-        if job.retry:
-            return "retry of failed posts"
-        if job.scheduled and job.user:
-            if job.full_archive:
-                return "watchlist: whole archive"
-            return "watchlist: weekly check"
-        if job.scheduled:
-            return "watchlist: removed gallery lookups"
-        if job.user:
-            return "Download: whole archive" if job.full_archive else "Download: new posts in archive"
-        return "userscript posts: lookups"
 
     @staticmethod
     def _options(args: Configuration) -> str:

@@ -290,8 +290,9 @@ function source(job) {
   if (job.user) parts.push(el("span", {}, "u/", userLink(job.user)));
   else if (job.retry) parts.push(`${job.total} failed posts`);
   else parts.push(`${job.total} posts`);
-  if (job.retry) parts.push(el("span", { class: "badge warn" }, "retry"));
-  else if (job.scheduled) parts.push(el("span", { class: "badge info" }, "scheduled"));
+  // Where the job came from, with why it reads the archive (if at all) as the tooltip
+  const kind = { retry: "warn", watchlist: "info" }[job.origin] || "";
+  parts.push(el("span", { class: `badge ${kind}`, title: job.purpose }, job.origin));
   return parts;
 }
 

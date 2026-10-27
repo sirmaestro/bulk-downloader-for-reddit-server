@@ -235,19 +235,21 @@ def test_retry_failed_option(tmp_path: Path, arguments: list, expected: bool):
 
 
 @pytest.mark.parametrize(
-    ("fields", "purpose"),
+    ("fields", "origin", "purpose"),
     (
-        ({"user": "x", "full_archive": True, "scheduled": True}, "watchlist: whole archive"),
-        ({"user": "x", "after": 1, "scheduled": True}, "watchlist: weekly check"),
-        ({"posts": [{}], "scheduled": True}, "watchlist: removed gallery lookups"),
-        ({"posts": [{}], "scheduled": True, "retry": True}, "retry of failed posts"),
-        ({"user": "x", "full_archive": True}, "Download: whole archive"),
-        ({"user": "x"}, "Download: new posts in archive"),
-        ({"posts": [{}]}, "userscript posts: lookups"),
+        ({"user": "x", "full_archive": True, "scheduled": True}, "watchlist", "watchlist: whole archive"),
+        ({"user": "x", "after": 1, "scheduled": True}, "watchlist", "watchlist: weekly check"),
+        ({"posts": [{}], "scheduled": True}, "watchlist", "watchlist: removed gallery lookups"),
+        ({"posts": [{}], "scheduled": True, "retry": True}, "retry", "retry of failed posts"),
+        ({"user": "x", "full_archive": True}, "userscript", "Download: whole archive"),
+        ({"user": "x"}, "userscript", "Download: new posts in archive"),
+        ({"posts": [{}]}, "userscript", "userscript posts: lookups"),
     ),
 )
-def test_request_purpose(fields: dict, purpose: str):
-    assert DownloadServer._purpose(Job("id", "folder", **fields)) == purpose
+def test_job_origin_and_purpose(fields: dict, origin: str, purpose: str):
+    job = Job("id", "folder", **fields)
+    assert (job.origin, job.purpose) == (origin, purpose)
+    assert (job.summary()["origin"], job.summary()["purpose"]) == (origin, purpose)
 
 
 def test_requests_endpoint(server, tmp_path: Path):
