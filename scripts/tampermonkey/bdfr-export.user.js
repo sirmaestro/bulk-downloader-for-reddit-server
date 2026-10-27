@@ -110,8 +110,8 @@
     // the watchlist's gone_active_days old, bdfr serve still lists it, marked gone, and it's synced as usual (a
     // temporary suspension or shadowban can be lifted); after that it's left out, and listed once more every
     // gone_recheck_days for another look (an older bdfr serve without that: checked again weekly). Hibernating users (no post for the watchlist's
-    // hibernate_days, by the server's or this script's newest post) are synced weekly: bdfr serve doesn't read the
-    // archive for them, so this free check of Reddit is what notices them posting again. Aliases (old accounts) are
+    // hibernate_days, by the server's or this script's newest post) are synced weekly: bdfr serve reads no weekly
+    // archive windows for them, so this free check of Reddit is what notices them posting again. Aliases (old accounts) are
     // never synced. "Sync now" (the panel's Sync button, or Tampermonkey's menu on any page) syncs every watched user
     // at once, however recently they were synced. A Sync now that didn't get through every user (stopped with the Sync
     // button, the tab closed, bdfr serve down) is carried on by the next one, skipping the users it already synced.

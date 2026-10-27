@@ -196,11 +196,10 @@ def test_users_quiet_for_hibernate_days_hibernate(serve, tmp_path, clock, quiet_
     assert len(FakeDownloader.runs) == (1 if quiet_days + 30 > 60 else 2)
 
 
-def test_hibernating_from_saved_state_reads_nothing(serve, tmp_path, clock):
+def test_hibernating_from_saved_state_reads_no_windows(serve, tmp_path, clock):
     write_watchlist(tmp_path / "watchlist.yaml", "users: [someone, other]\n")
-    (tmp_path / "watchlist_state.json").write_text(
-        json.dumps({"users": {"someone": {"newest_post": START - 90 * DAY}}}), encoding="utf-8"
-    )
+    state = {"newest_post": START - 90 * DAY, "full_archive_done": START - DAY, "window_end": START - DAY}
+    (tmp_path / "watchlist_state.json").write_text(json.dumps({"users": {"someone": state}}), encoding="utf-8")
     scheduler = make_scheduler(serve, tmp_path, clock)
     tick(scheduler, serve)
     clock.now += BaselineScheduler.PAUSE_SECONDS
@@ -508,16 +507,22 @@ def test_removed_galleries_of_a_user_with_windows_are_looked_up_first(serve, tmp
     assert listing.user == "someone" and listing.full_archive  # no baseline: the whole archive
 
 
-def test_hibernating_users_get_no_whole_archive_read(serve, tmp_path, clock):
-    write_watchlist(tmp_path / "watchlist.yaml", "users: [quiet]\n")
+def test_users_quiet_when_added_get_one_whole_read_after_active_users(serve, tmp_path, clock):
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [quiet, active]\n")
     (tmp_path / "watchlist_state.json").write_text(
         json.dumps({"users": {"quiet": {"newest_post": START - 300 * DAY}}}), encoding="utf-8"
     )
     scheduler = make_scheduler(serve, tmp_path, clock)
-    for _ in range(3):
+    for _ in range(2):
         tick(scheduler, serve)
+        clock.now += BaselineScheduler.PAUSE_SECONDS
+    assert [(run.user[0], run.listing_after) for run in FakeDownloader.runs] == [("active", None), ("quiet", None)]
+    assert scheduler.state["quiet"]["full_archive_done"]
+    # Then no weekly windows for them while they hibernate; the active user's go on
+    for _ in range(3):
         clock.now += 8 * DAY
-    assert FakeDownloader.runs == []
+        tick(scheduler, serve)
+    assert [run.user[0] for run in FakeDownloader.runs[2:]] == ["active"] * 3
 
 
 def test_settings_from_before_are_warned_about_and_ignored(serve, tmp_path, clock, caplog):

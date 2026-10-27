@@ -47,9 +47,10 @@ class BaselineScheduler:
     are recorded as gone and not looked up again.
 
     Users whose newest known post is more than `hibernate_days` old (stopped posting, banned, moved to another account)
-    hibernate: their archive isn't read, and only the userscript's free weekly check of Reddit looks for new posts. A
-    post sent by the userscript (any job's posts, through `note_posts`) wakes them up again. A user's old accounts
-    (`aliases`) are never checked; they only say which folder those accounts' posts belong in.
+    hibernate: no weekly windows are read for them, and only the userscript's free weekly check of Reddit looks for
+    new posts. A post sent by the userscript (any job's posts, through `note_posts`) wakes them up again. Their whole
+    archive is still read once if it hasn't been (they may have been quiet when added), after active users' reads. A
+    user's old accounts (`aliases`) are never checked; they only say which folder those accounts' posts belong in.
 
     Accounts the userscript found suspended or deleted on Reddit (`note_gone`) get no archive checks. Those that
     posted within `gone_active_days` stay listed in GET /watchlist, marked `gone`, and are synced as usual: a
@@ -226,7 +227,9 @@ class BaselineScheduler:
                 self.low_disk = True
                 return
             self.low_disk = False
-            for user in self.users:
+            # Active users first: a hibernating user's one whole read waits behind theirs
+            by_activity = sorted(self.users, key=lambda u: self._hibernating(self.state.get(u["name"].lower()), now))
+            for user in by_activity:
                 state = self.state.get(user["name"].lower())
                 if self._checked(user, state, now) and self._due(user, state, now):
                     self._submit(user, now, free)
@@ -248,6 +251,8 @@ class BaselineScheduler:
             return False  # old accounts: only which folder their posts go in
         if (state or {}).get("gone"):
             return False  # suspended or deleted on Reddit
+        if self._next_read(state) == "full":
+            return True  # read once, hibernating or not (a user may have been quiet when added)
         return not self._hibernating(state, now) and self._next_read(state) is not None
 
     @staticmethod
@@ -604,8 +609,9 @@ class BaselineScheduler:
                         and not state.get("full_archive_stopped"),
                         "last_success": state.get("last_success"),
                         "last_error": state.get("last_error"),
-                        # Whether the archive is read at all now (not for aliases, gone or hibernating users, nor
-                        # before the userscript has read Reddit to the end unless weekly windows have begun)
+                        # Whether the archive is read at all now (not for aliases or gone users, nor for hibernating
+                        # ones once their whole archive was read, nor before the userscript has read Reddit to the end
+                        # unless weekly windows have begun)
                         "checked": checked,
                         # None: due now, or not checked
                         "next_check": self._next_check(user, state) if checked else None,
