@@ -39,7 +39,10 @@ class BaselineScheduler:
     `min_free_gb` free. Every `interval_days` a job reads the window since the previous successful run (or since the
     whole-archive read began), starting `overlap_days` earlier for posts the archive got late, to its end, so gaps
     between downloaded posts are filled (downloaded posts cost no requests). One scheduled job is queued at a time,
-    with a pause between them. A failed run leaves the window where it was and is retried after `retry_hours`.
+    with a pause between them. A failed run leaves the window where it was and is retried after `retry_hours`; a failed
+    whole-archive read carries on below the oldest post it reached (`full_archive_before`; `full_archive_began` keeps
+    when a read from the newest post began, where the windows start), and posts that failed above it aren't read
+    again, so its listing pages aren't asked for twice.
 
     Removed galleries the folder knows of without their image list (Reddit drops it; see unavailable_post_key), and
     failed galleries in the retry list without one, are looked up in the archive by ID (100 per request), at most
@@ -514,6 +517,11 @@ class BaselineScheduler:
                 if not job.before:
                     # Read from the newest post: the weekly windows start here
                     state["window_end"] = started
+                elif not state.get("window_end") and state.get("full_archive_began"):
+                    # Carried on from a read from the newest post that failed part way: the windows start where it began
+                    state["window_end"] = state["full_archive_began"]
+                if state.get("window_end"):
+                    state.pop("full_archive_began", None)
                 if stop_reason == "limit":
                     oldest = getattr(job, "oldest_post", None)
                     if oldest:
@@ -544,6 +552,20 @@ class BaselineScheduler:
             elif job.state == "done":
                 state.update(window_end=started, last_success=self.clock(), last_error=None)
                 logger.info(f"Baseline for u/{user['name']} done: {counts}")
+            elif job.full_archive and getattr(job, "oldest_post", None):
+                # Carried on below the oldest post it reached rather than read again from the top, so its listing pages
+                # aren't asked for again. Posts that failed above it aren't tried again: fewer requests win.
+                state["last_error"] = job.error or f"job {job.state}"
+                if not job.before:
+                    state.setdefault("full_archive_began", started)
+                state["full_archive_before"] = int(job.oldest_post) + 1
+                failed = job.counts.get("failed", 0)
+                skipped = f"; {failed} posts that failed above it aren't read again" if failed else ""
+                logger.warning(
+                    f"Whole archive of u/{user['name']} failed ({state['last_error']}); it carries on below "
+                    f"{time.strftime('%Y-%m-%d', time.gmtime(job.oldest_post))} in {self.settings['retry_hours']} "
+                    f"hours{skipped}"
+                )
             else:
                 state["last_error"] = job.error or f"job {job.state}"
                 logger.warning(

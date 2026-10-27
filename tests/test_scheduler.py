@@ -35,6 +35,8 @@ class FakeDownloader:
     bytes_written = 0
     stop_reason = None
     oldest_listed = None
+    # (post ID, result, label) reported to the job by the next runs
+    results = []
 
     def __init__(self, args: Configuration, log_file: bool = True):
         self.log_file = log_file
@@ -49,6 +51,8 @@ class FakeDownloader:
 
     def download(self):
         FakeDownloader.runs.append(self.args)
+        for result in FakeDownloader.results:
+            self.progress_callback(*result)
         if FakeDownloader.gate is not None:
             assert FakeDownloader.gate.wait(10), "the test never released the job"
 
@@ -73,6 +77,7 @@ def serve(tmp_path: Path):
     FakeDownloader.errors_to_report = []
     FakeDownloader.newest_post = None
     FakeDownloader.bytes_written, FakeDownloader.stop_reason, FakeDownloader.oldest_listed = 0, None, None
+    FakeDownloader.results = []
     with patch("bdfr.server.Downloader", FakeDownloader):
         yield DownloadServer(Configuration(), tmp_path / "root", "token")
 
@@ -590,6 +595,47 @@ def test_never_successful_user_retries_whole_archive(serve, tmp_path, clock):
     assert FakeDownloader.runs[-1].listing_after is None and FakeDownloader.runs[-1].stop_at_existing == 0
     # What the failed read wrote counts towards the storage limit
     assert FakeDownloader.runs[-1].stop_at_bytes == 8 * GB
+
+
+def test_failed_whole_archive_carries_on_below_where_it_got_to(serve, tmp_path, clock, caplog):
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
+    scheduler = make_scheduler(serve, tmp_path, clock)
+    FakeDownloader.errors_to_report = ["Arctic Shift request failed after 5 attempts: HTTP 422"]
+    FakeDownloader.oldest_listed = START - 300 * DAY
+    FakeDownloader.results = [("abc", None, "failed"), ("def", False, "new")]
+    with caplog.at_level(logging.WARNING):
+        tick(scheduler, serve)
+    assert "carries on below" in caplog.text and "1 posts that failed above it aren't read again" in caplog.text
+    state = scheduler.state["someone"]
+    assert state["full_archive_before"] == START - 300 * DAY + 1 and state["full_archive_began"] == START
+    assert "window_end" not in state and not state.get("full_archive_done")
+
+    # Fails again further down: carries on below that, still remembering where the whole read began
+    FakeDownloader.results = []
+    FakeDownloader.oldest_listed = START - 500 * DAY
+    clock.now += DAY
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].listing_before == START - 300 * DAY + 1
+    assert scheduler.state["someone"]["full_archive_before"] == START - 500 * DAY + 1
+    assert scheduler.state["someone"]["full_archive_began"] == START
+
+    # A failure before any post was reached keeps the resume point
+    FakeDownloader.oldest_listed = None
+    clock.now += DAY
+    tick(scheduler, serve)
+    assert scheduler.state["someone"]["full_archive_before"] == START - 500 * DAY + 1
+
+    # Finishes: the weekly windows start where the first attempt began, not where the last one did
+    FakeDownloader.errors_to_report = []
+    clock.now += DAY
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].listing_before == START - 500 * DAY + 1
+    state = scheduler.state["someone"]
+    assert state["full_archive_done"] == clock.now and state["window_end"] == START
+    assert "full_archive_began" not in state and "full_archive_before" not in state
+    clock.now += 7 * DAY
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].listing_after == START - 7 * DAY
 
 
 def test_state_survives_restart(serve, tmp_path, clock):
