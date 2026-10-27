@@ -3,14 +3,15 @@
 
 """The record of `bdfr serve`'s requests to Arctic Shift: every attempt (failed ones and retries included), with the
 job it was for and why, appended to arctic_shift_requests.jsonl in BDFR's configuration directory and kept for
-KEEP_DAYS. The dashboard's Archive tab shows it (GET /requests); reading it never makes a request."""
+KEEP_DAYS (the file is rewritten without older ones at start and about once a day). The dashboard's Archive tab
+shows it (GET /requests); reading it never makes a request."""
 
 import json
 import logging
 import os
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 from typing import Callable
 
@@ -32,16 +33,25 @@ class RequestLog:
         self.path = Path(path)
         self.clock = clock
         self._lock = threading.Lock()
-        self.entries: list[dict] = self._load()
+        # When the file was last rewritten without requests older than KEEP_DAYS
+        self._rewritten = self.clock()
+        self.entries: deque[dict] = deque(self._load())
 
     def record(self, entry: dict):
         """Adds one request (ArcticShift.on_request's dict plus the job's id, folder, user and purpose)"""
         with self._lock:
             self.entries.append(entry)
-            # The file itself is trimmed when serve starts
-            oldest = self.clock() - self.KEEP_DAYS * DAY
+            now = self.clock()
+            oldest = now - self.KEEP_DAYS * DAY
+            trimmed = False
             while self.entries and self.entries[0].get("time", 0) < oldest:
-                self.entries.pop(0)
+                self.entries.popleft()
+                trimmed = True
+            if trimmed and now - self._rewritten >= DAY:
+                # A serve running for months would otherwise only ever add to the file
+                self._rewritten = now
+                self._rewrite(self.entries)
+                return
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 with open(self.path, "a", encoding="utf-8") as file:
@@ -124,10 +134,14 @@ class RequestLog:
             if isinstance(entry, dict) and isinstance(entry.get("time"), (int, float)) and entry["time"] >= oldest:
                 entries.append(entry)
         if len(entries) < len(lines):
-            temp = self.path.with_name(self.path.name + ".tmp")
-            try:
-                temp.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
-                os.replace(temp, self.path)
-            except OSError as e:
-                logger.warning(f"Could not save {self.path}: {e}")
+            self._rewrite(entries)
         return entries
+
+    def _rewrite(self, entries):
+        temp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
+            os.replace(temp, self.path)
+        except OSError as e:
+            logger.warning(f"Could not save {self.path}: {e}")

@@ -52,3 +52,28 @@ def test_kept_across_restarts_for_keep_days(tmp_path: Path):
     assert [e["purpose"] for e in again.entries] == ["recent"]
     # Old and unreadable lines are dropped from the file too
     assert [json.loads(line)["purpose"] for line in path.read_text(encoding="utf-8").splitlines()] == ["recent"]
+
+
+def test_file_rewritten_about_once_a_day(tmp_path: Path):
+    path = tmp_path / "requests.jsonl"
+    now = [NOW]
+    log = RequestLog(path, clock=lambda: now[0])
+    keep = log.KEEP_DAYS * DAY
+    log.record({"time": NOW, "purpose": "first"})
+
+    def purposes() -> list[str]:
+        return [json.loads(line)["purpose"] for line in path.read_text(encoding="utf-8").splitlines()]
+
+    # A day or more since the last rewrite, and a request expired: the file is rewritten with only what's kept
+    now[0] = NOW + keep + 1
+    log.record({"time": now[0] - keep + 3600, "purpose": "second"})
+    assert purposes() == ["second"]
+    # Within a day of that, expired requests are only dropped from memory
+    now[0] += 2 * 3600
+    log.record({"time": now[0] - keep + 3600, "purpose": "third"})
+    assert [e["purpose"] for e in log.entries] == ["third"]
+    assert purposes() == ["second", "third"]
+    # A day later the next expiry rewrites the file again
+    now[0] += DAY
+    log.record({"time": now[0], "purpose": "fourth"})
+    assert purposes() == ["fourth"]
