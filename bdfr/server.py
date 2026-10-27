@@ -553,7 +553,7 @@ class DownloadServer:
     def _file_counts(directory: Path) -> dict:
         """The folder's downloads (not BDFR's own files), its subfolders included: how many, their total size, how many
         are videos and images, and how many posts they're from (a post's several files differ only in their index,
-        `_1`, `_2`, ..., whatever the file scheme)"""
+        `_1`, `_2`, ..., whatever the file scheme; longer numbers, e.g. a year ending a title, aren't indexes)"""
         counts = {"file_count": 0, "bytes": 0, "videos": 0, "images": 0, "posts": 0}
         posts = set()
         for folder, _subfolders, names in os.walk(directory):
@@ -569,7 +569,7 @@ class DownloadServer:
                 counts["bytes"] += size
                 counts["videos"] += suffix in VIDEO_SUFFIXES
                 counts["images"] += suffix in IMAGE_SUFFIXES
-                posts.add((folder, re.sub(r"_\d+$", "", os.path.splitext(name)[0])))
+                posts.add((folder, re.sub(r"_\d{1,3}$", "", os.path.splitext(name)[0])))
         counts["posts"] = len(posts)
         return counts
 

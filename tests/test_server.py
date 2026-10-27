@@ -304,6 +304,13 @@ def test_known_posts_needs_post_id_scheme(server):
     assert result == {"known": [], "known_by_link": [], "duplicates": [], "unavailable": [], "supported": False}
 
 
+def test_file_counts_posts_by_gallery_index(tmp_path: Path):
+    # Without the post ID in the name (older schemes), a title ending in a number must not merge posts
+    for name in ("Sunset_2023.jpg", "Sunset_2024.jpg", "A gallery_1.jpg", "A gallery_2.jpg", "A gallery_12.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    assert DownloadServer._file_counts(tmp_path)["posts"] == 3
+
+
 def test_duplicates_are_counted_apart_from_skips():
     job = Job("j", "folder", posts=[{"id": "a"}, {"id": "b"}])
     job.record("a", None, "duplicate")
