@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlsplit
 import platformdirs
 
 from bdfr import __version__, logs
+from bdfr.arctic_shift import Outage
 from bdfr.configuration import Configuration
 from bdfr.downloader import (
     Downloader,
@@ -80,7 +81,10 @@ POST_PATHS = (
     "/watchlist/reddit",
     "/watchlist/continue",
     "/watchlist/stop",
+    "/watchlist/archive",
+    "/watchlist/hidden",
     "/retries/stop",
+    "/sync",
 )
 # What the dashboard's Folders tab counts as videos and images (anything else, e.g. text from self posts, as other)
 VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".m4v", ".avi"}
@@ -100,6 +104,7 @@ class Job:
         retry: bool = False,
         scheduled: bool = False,
         limit_bytes: Optional[int] = None,
+        sync: bool = False,
     ):
         self.id = job_id
         self.folder = folder
@@ -115,6 +120,8 @@ class Job:
         self.after = after
         # Posts from the failed-post retry list (bdfr/retries.py), downloaded without archive lookups
         self.retry = retry
+        # Posts the userscript's background sync read from a watched user's Reddit listing (not a page's Download)
+        self.sync = sync
         # Queued by serve itself (the watchlist's archive checks, retries), so it waits behind the userscript's jobs
         self.scheduled = scheduled
         # With a user: stop the listing once this many bytes were written (the user's storage limit, or the disk's)
@@ -132,6 +139,8 @@ class Job:
         self.bytes_written = 0
         self.stop_reason: Optional[str] = None
         self.oldest_post: Optional[float] = None
+        # The user's archive was off when the job ran, so it wasn't read (a scheduled job then records nothing)
+        self.archive_skipped = False
         self.created = time.time()
         self.started: Optional[float] = None
         self.finished: Optional[float] = None
@@ -163,7 +172,7 @@ class Job:
             return "watchlist: removed gallery lookups"
         if self.user:
             return "Download: whole archive" if self.full_archive else "Download: new posts in archive"
-        return "userscript posts: lookups"
+        return "userscript sync: lookups" if self.sync else "userscript posts: lookups"
 
     def summary(self) -> dict:
         """The job without its per-post results, for GET /jobs"""
@@ -212,6 +221,13 @@ class DownloadServer:
         self.notifier = None
         # Every request jobs make to Arctic Shift (bdfr/request_log.py), when serve keeps that record
         self.requests = None
+        # Whether Arctic Shift is down, shared by every job, so an outage pauses them all after one failed request
+        self.archive_outage = Outage()
+        # The userscript's background sync: when a browser last looked for due users (GET /watchlist with
+        # X-BDFR-Sync), which browser, and its latest run's report (POST /sync)
+        self.sync_checked: Optional[float] = None
+        self.sync_browser: Optional[str] = None
+        self.last_sync: Optional[dict] = None
         # serve_log.txt, which GET /log reads, when serve logs to a file
         self.log_path: Optional[Path] = None
         self.started = time.time()
@@ -368,7 +384,8 @@ class DownloadServer:
             not isinstance(limit_bytes, int) or isinstance(limit_bytes, bool) or limit_bytes <= 0 or user is None
         ):
             raise ValueError("'limit_bytes' must be a positive number of bytes, with a 'user'")
-        job = Job(secrets.token_hex(6), folder, posts, user, full, before, after, retry, scheduled, limit_bytes)
+        sync = payload.get("source") == "sync" and user is None
+        job = Job(secrets.token_hex(6), folder, posts, user, full, before, after, retry, scheduled, limit_bytes, sync)
         job.on_finish = on_finish
         if posts and self.scheduler is not None and not retry and not scheduled:
             # Posts read from Reddit by the userscript wake hibernating watched users (the scheduler's own jobs, queued
@@ -426,6 +443,22 @@ class DownloadServer:
         dashboard's Stop; Continue undoes it)"""
         return self.scheduler.stop_archive(self._watched_user(payload))
 
+    def set_archive(self, payload: dict) -> dict:
+        """POST /watchlist/archive: {"user", "archive": true | false} turns a user's archive on or off (the dashboard's
+        toggle): off, nothing reads it for them and only the userscript's posts are downloaded"""
+        user = self._watched_user(payload)
+        if not isinstance(payload.get("archive"), bool):
+            raise ValueError("'archive' must be true or false")
+        return self.scheduler.set_archive(user, payload["archive"])
+
+    def note_hidden(self, payload: dict) -> dict:
+        """POST /watchlist/hidden: {"user", "hidden": true | false} whether the userscript can read a watched user's
+        posts on Reddit (hidden: their listing answers 403, or lists nothing, while the account is there)"""
+        user = self._watched_user(payload)
+        if not isinstance(payload.get("hidden"), bool):
+            raise ValueError("'hidden' must be true or false")
+        return self.scheduler.note_hidden(user, payload["hidden"])
+
     def stop_retrying(self, payload: dict) -> dict:
         """POST /retries/stop: {"folder", "id"} gives up on a post on the retry list (the dashboard's Stop)"""
         if self.retries is None:
@@ -440,6 +473,71 @@ class DownloadServer:
         if self.scheduler is None:
             return {"users": [], "enabled": False}
         return self.scheduler.snapshot()
+
+    # Checks for due users further apart than this mean no browser had old.reddit open (they come every 15 minutes)
+    SYNC_GAP_SECONDS = 3600
+
+    def note_sync_check(self, browser: str):
+        """GET /watchlist from the userscript's sync (every 15 minutes while an old.reddit tab is open): logged only
+        when it comes after a gap, so the log shows when no browser was syncing"""
+        browser = self._browser(browser)
+        now, previous = time.time(), self.sync_checked
+        if previous is None:
+            logger.info(f"Userscript sync: first check since serve started ({browser})")
+        elif now - previous > self.SYNC_GAP_SECONDS:
+            logger.info(
+                f"Userscript sync: checking again after {self._span(now - previous)} without a check ({browser})"
+            )
+        self.sync_checked, self.sync_browser = now, browser
+
+    def note_sync(self, payload: dict) -> dict:
+        """POST /sync: the userscript's report of a sync run that read at least one user, logged in one line"""
+        if not isinstance(payload, dict):
+            raise ValueError("Expected a JSON object")
+        counts = {}
+        for key in ("users", "sent", "failed", "gone", "seconds"):
+            value = payload.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ValueError(f"'{key}' must be a number")
+            counts[key] = value
+        browser = self._browser(payload.get("browser"))
+        parts = [
+            f"read {counts['users']} user{'s' if counts['users'] != 1 else ''}",
+            f"sent {counts['sent']} new posts",
+        ]
+        if counts["failed"]:
+            parts.append(f"{counts['failed']} failed")
+        if counts["gone"]:
+            parts.append(f"{counts['gone']} suspended or deleted")
+        how = "Sync now" if payload.get("forced") else "background"
+        stopped = "; stopped before the end" if payload.get("stopped") else ""
+        logger.info(
+            f"Userscript sync ({how}, {browser}): {', '.join(parts)} in {self._duration(counts['seconds'])}{stopped}"
+        )
+        self.last_sync = {
+            "time": time.time(),
+            "browser": browser,
+            "forced": bool(payload.get("forced")),
+            "stopped": bool(payload.get("stopped")),
+            **counts,
+        }
+        return self.last_sync
+
+    @staticmethod
+    def _browser(value) -> str:
+        """The browser the userscript runs in, as it describes itself (e.g. "Firefox on Windows"), made safe to log"""
+        value = re.sub(r"[^\w .()/-]", "", str(value or ""))[:60].strip()
+        return value or "unknown browser"
+
+    @staticmethod
+    def _span(seconds: float) -> str:
+        """A longer time span, such as 5h 12m or 2d 3h"""
+        minutes = int(seconds) // 60
+        hours, minutes = divmod(minutes, 60)
+        days, hours = divmod(hours, 24)
+        if days:
+            return f"{days}d {hours}h"
+        return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
 
     def user_info(self, name: str) -> dict:
         """GET /user?name=: for the userscript's panel on a user's page: the user's /watchlist entry (None when not
@@ -484,6 +582,10 @@ class DownloadServer:
             # Of the queued jobs, those serve queued itself (archive checks, retries)
             "scheduled": scheduled,
             "retries": self.retries.snapshot() if self.retries else None,
+            # Arctic Shift is down: since when, no requests until when, and why
+            "archive_down": self.archive_outage.snapshot(),
+            # The userscript's background sync: its latest check for due users, and its latest run
+            "sync": {"checked": self.sync_checked, "browser": self.sync_browser, "last_run": self.last_sync},
             "started": self.started,
             "notify": self.notifier is not None,
             "log": str(self.log_path) if self.log_path else None,
@@ -632,6 +734,11 @@ class DownloadServer:
             setattr(args, key, [])
         args.submitted = False
         post_file = None
+        # Turned off in the dashboard: the user's archive isn't read, for any job into their folder
+        archive_off = self.scheduler is not None and self.scheduler.archive_off(job.folder)
+        if archive_off:
+            args.archive_lookups = False
+            job.archive_skipped = True
         if job.posts:
             # Every given post is checked (--stop-at-existing only applies to listings), so a run of existing posts
             # doesn't hide newer ones after it
@@ -642,7 +749,9 @@ class DownloadServer:
             if job.retry:
                 # The posts' data is what the first job had, so the archive has nothing to add
                 args.archive_lookups = False
-        if job.user:
+        if job.user and archive_off:
+            logger.info(f"The archive is off for /{job.folder}: u/{job.user}'s archive listing isn't read")
+        elif job.user:
             # The page's posts are downloaded first, then the user's listing: until already-downloaded posts, or all
             # of it. Posts already in the folder are recognised from their IDs without requests, so reading the whole
             # archive mostly costs the listing's own requests.
@@ -670,6 +779,7 @@ class DownloadServer:
             # Its lines go to serve_log.txt with the server's, so it opens no log file of its own
             downloader = Downloader(args, log_file=False)
             downloader.progress_callback = job.record
+            downloader.arctic_shift.outage = self.archive_outage
             if self.requests is not None:
                 downloader.arctic_shift.on_request = lambda entry: self._record_request(job, entry)
             failed_posts = downloader.failed_posts
@@ -691,7 +801,9 @@ class DownloadServer:
             took = self._duration(time.time() - started)
             if error:
                 logger.warning(f"Failed after {took}: {error}")
-                self.notify(f"Job {job.id} failed ({self._describe(job)}): {error}")
+                if not self.archive_outage.down:
+                    # Nothing the owner can do about an outage; jobs carry on once the archive answers
+                    self.notify(f"Job {job.id} failed ({self._describe(job)}): {error}")
             else:
                 logger.info(f"Done in {took}")
             if post_file:
@@ -759,6 +871,8 @@ class DownloadServer:
             source += f" (with {len(job.posts)} from the page)" if job.posts else ""
         elif job.retry:
             source = f"{len(job.posts)} failed posts to retry"
+        elif job.sync:
+            source = f"{len(job.posts)} new posts from the userscript's sync"
         else:
             source = f"{len(job.posts)} posts from a page"
         return f"{source} into {self.root / job.folder}"
@@ -811,6 +925,8 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
             if self.path == "/status":
                 self._send(200, server.status())
             elif self.path == "/watchlist":
+                if self.headers.get("X-BDFR-Sync"):
+                    server.note_sync_check(self.headers["X-BDFR-Sync"])
                 self._send(200, server.watchlist())
             elif self.path == "/jobs":
                 self._send(200, server.recent_jobs())
@@ -859,8 +975,14 @@ def make_handler(server: DownloadServer) -> type[BaseHTTPRequestHandler]:
                     self._send(200, server.continue_archive(payload))
                 elif self.path == "/watchlist/stop":
                     self._send(200, server.stop_archive(payload))
+                elif self.path == "/watchlist/archive":
+                    self._send(200, server.set_archive(payload))
+                elif self.path == "/watchlist/hidden":
+                    self._send(200, server.note_hidden(payload))
                 elif self.path == "/retries/stop":
                     self._send(200, server.stop_retrying(payload))
+                elif self.path == "/sync":
+                    self._send(200, server.note_sync(payload))
                 else:
                     self._send(202, server.submit(payload).to_dict())
             except (ValueError, json.JSONDecodeError) as e:

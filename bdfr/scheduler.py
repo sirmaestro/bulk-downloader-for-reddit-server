@@ -44,6 +44,11 @@ class BaselineScheduler:
     when a read from the newest post began, where the windows start), and posts that failed above it aren't read
     again, so its listing pages aren't asked for twice.
 
+    While Arctic Shift is down (a request failed every attempt; see arctic_shift.Outage, shared by serve's jobs) nothing
+    is queued. Jobs that failed because of it don't count against their users (`archive_down` in the state): they're due
+    again as soon as the archive answers, rather than each `retry_hours` after its own failure, so an outage costs one
+    request per pause instead of a failed job per user per day.
+
     Removed galleries the folder knows of without their image list (Reddit drops it; see unavailable_post_key), and
     failed galleries in the retry list without one, are looked up in the archive by ID (100 per request), at most
     once every `retry_hours` per user, hibernating or not. Ones the archive doesn't have, or has without an image list,
@@ -54,6 +59,15 @@ class BaselineScheduler:
     new posts. A post sent by the userscript (any job's posts, through `note_posts`) wakes them up again. Their whole
     archive is still read once if it hasn't been (they may have been quiet when added), after active users' reads. A
     user's old accounts (`aliases`) are never checked; they only say which folder those accounts' posts belong in.
+
+    A user's archive can be turned off in the dashboard (POST /watchlist/archive; `archive_off` in the state): then
+    nothing reads it for them, neither the scheduler (no whole read, windows or lookups) nor the userscript's jobs into
+    their folder (no listing, no lookups by ID), and only the userscript's posts are downloaded.
+
+    Users whose posts the userscript can't read on Reddit (`hidden_on_reddit`, POST /watchlist/hidden: their listing
+    answers 403 or lists nothing while the account is there; e.g. they hid their posts from their profile) never
+    hibernate: the userscript can't see them post again, so the weekly windows are all that notice it. Their Reddit
+    listing counts as read to its end, so their whole archive is read.
 
     Accounts the userscript found suspended or deleted on Reddit (`note_gone`) get no archive checks. Those that
     posted within `gone_active_days` stay listed in GET /watchlist, marked `gone`, and are synced as usual: a
@@ -209,6 +223,8 @@ class BaselineScheduler:
             now = self.clock()
             if self._pending is not None or now - self._last_finished < self.PAUSE_SECONDS:
                 return
+            if self.server.archive_outage.paused_until() is not None:
+                return  # Arctic Shift is down (logged when it was found); a job now would fail without a request
             # Known removed galleries first: a few requests, before any listing is read
             for user in self.users:
                 if self._lookups_due(user, self.state.get(user["name"].lower()), now):
@@ -254,6 +270,8 @@ class BaselineScheduler:
             return False  # old accounts: only which folder their posts go in
         if (state or {}).get("gone"):
             return False  # suspended or deleted on Reddit
+        if (state or {}).get("archive_off"):
+            return False  # turned off in the dashboard: only the userscript's posts
         if self._next_read(state) == "full":
             return True  # read once, hibernating or not (a user may have been quiet when added)
         return not self._hibernating(state, now) and self._next_read(state) is not None
@@ -280,7 +298,7 @@ class BaselineScheduler:
     def _lookups_due(self, user: dict, state: Optional[dict], now: float) -> bool:
         """Whether to look for the user's removed galleries to look up by ID (see the class docstring)"""
         state = state or {}
-        if "alias_of" in user or state.get("gone"):
+        if "alias_of" in user or state.get("gone") or state.get("archive_off"):
             return False
         return now - (state.get("lookups_checked") or 0) >= self.settings["retry_hours"] * 3600
 
@@ -314,8 +332,20 @@ class BaselineScheduler:
     def _lookups_finished(self, user: dict, job):
         with self._lock:
             counts = ", ".join(f"{n} {label}" for label, n in job.counts.items() if n)
-            if job.state == "done":
+            if getattr(job, "archive_skipped", False):
+                # Queued before the archive was turned off: looked up once it's turned on again
+                self.state.get(user["name"].lower(), {}).pop("lookups_checked", None)
+                self._save_state()
+                logger.info(f"Lookups for u/{user['name']} not made: their archive was turned off")
+            elif job.state == "done":
                 logger.info(f"Lookups for u/{user['name']} done: {counts or 'nothing'}")
+            elif self.server.archive_outage.down:
+                # Looked up again first thing once the archive answers
+                self.state.get(user["name"].lower(), {}).pop("lookups_checked", None)
+                self._save_state()
+                logger.warning(
+                    f"Lookups for u/{user['name']} failed ({job.error}); tried again once Arctic Shift answers"
+                )
             else:
                 logger.warning(
                     f"Lookups for u/{user['name']} failed ({job.error or job.state}); tried again in "
@@ -338,6 +368,8 @@ class BaselineScheduler:
         return isinstance(newest, (int, float)) and now - newest < self.settings["gone_active_days"] * DAY
 
     def _hibernating(self, state: Optional[dict], now: float) -> bool:
+        if (state or {}).get("hidden_on_reddit"):
+            return False  # the userscript can't see them post again, so only the weekly windows would
         newest = (state or {}).get("newest_post")
         return isinstance(newest, (int, float)) and now - newest > self.settings["hibernate_days"] * DAY
 
@@ -349,11 +381,19 @@ class BaselineScheduler:
         """When the user's next check is due; None: now"""
         if not state or not state.get("last_attempt"):
             return None
-        if state.get("last_error"):
+        if state.get("last_error") and not state.get("archive_down"):
             return state["last_attempt"] + self.settings["retry_hours"] * 3600
         if self._next_read(state) == "full":
             return None
         return (state.get("last_success") or 0) + self.settings["interval_days"] * DAY
+
+    def archive_off(self, folder: str) -> bool:
+        """Whether the archive is turned off for the watched user whose folder this is. Lock-free, like folder_for."""
+        return any(
+            user["folder"] == folder and (self.state.get(user["name"].lower()) or {}).get("archive_off")
+            for user in self.users
+            if "alias_of" not in user
+        )
 
     def folder_for(self, folder: str) -> str:
         """The folder an alias's posts go in when `folder` is an alias's name (the userscript names a user page's folder
@@ -432,6 +472,49 @@ class BaselineScheduler:
                 logger.info(f"u/{user['name']}'s Reddit listing was read to its end; their whole archive is read next")
             return {"user": user["name"], "reddit_read": state["reddit_read"]}
 
+    def note_hidden(self, name: str, hidden: bool) -> dict:
+        """Records whether the userscript can read the user's posts on Reddit (see the class docstring)"""
+        with self._lock:
+            self._reload()
+            user = self._watched(name)
+            state = self.state.setdefault(user["name"].lower(), {})
+            if hidden:
+                if not state.get("hidden_on_reddit"):
+                    state["hidden_on_reddit"] = self.clock()
+                    if state.get("archive_off"):
+                        message = (
+                            f"u/{user['name']}'s posts are hidden on Reddit and their archive is off: nothing "
+                            "downloads their posts now"
+                        )
+                        logger.warning(message)
+                        self.server.notify(message)
+                    else:
+                        logger.info(f"u/{user['name']}'s posts are hidden on Reddit; only the archive has them")
+                # Reddit has nothing more to show, so the whole archive is read
+                state.setdefault("reddit_read", self.clock())
+            elif state.pop("hidden_on_reddit", None):
+                logger.info(f"u/{user['name']}'s posts can be read on Reddit again")
+            self._save_state()
+            return {"user": user["name"], "hidden_on_reddit": state.get("hidden_on_reddit")}
+
+    def set_archive(self, name: str, enabled: bool) -> dict:
+        """Turns the user's archive on or off (the dashboard's toggle; see the class docstring)"""
+        with self._lock:
+            self._reload()
+            user = self._watched(name)
+            state = self.state.setdefault(user["name"].lower(), {})
+            if enabled and state.pop("archive_off", None):
+                logger.info(f"u/{user['name']}'s archive is on again")
+            elif not enabled and not state.get("archive_off"):
+                state["archive_off"] = self.clock()
+                hidden = state.get("hidden_on_reddit")
+                logger.info(
+                    f"u/{user['name']}'s archive is off: only the userscript's posts are downloaded"
+                    + ("; their posts are hidden on Reddit, so nothing downloads them" if hidden else "")
+                )
+            self._save_state()
+            return {"user": user["name"], "archive_off": state.get("archive_off")}
+
     def continue_archive(self, name: str, limit_gb: float) -> dict:
         """Raises the storage limit of the user's whole-archive read to limit_gb, so a read that stopped at the old
         limit carries on from where it got to"""
@@ -499,17 +582,32 @@ class BaselineScheduler:
         except ValueError as e:
             self._pending = None
             state["last_error"] = str(e)
+            state.pop("archive_down", None)
             logger.warning(f"Could not queue the baseline for u/{user['name']}: {e}")
         self._save_state()
 
     def _finished(self, user: dict, started: float, job):
         with self._lock:
             state = self.state.setdefault(user["name"].lower(), {})
+            if getattr(job, "archive_skipped", False):
+                # Queued before the archive was turned off, so nothing was read: the window or whole read stays where
+                # it was, for when it's turned on again
+                logger.info(f"Baseline for u/{user['name']} not read: their archive was turned off")
+                self._pending = None
+                self._last_finished = self.clock()
+                return
             counts = ", ".join(f"{n} {label}" for label, n in job.counts.items())
             newest = getattr(job, "newest_post", None)
             if newest is not None and newest > (state.get("newest_post") or 0):
                 state["newest_post"] = newest
             stop_reason = getattr(job, "stop_reason", None)
+            # Failed because Arctic Shift is down: due again as soon as it answers, not in retry_hours
+            down = job.state != "done" and self.server.archive_outage.down
+            later = "once Arctic Shift answers" if down else f"in {self.settings['retry_hours']} hours"
+            if down:
+                state["archive_down"] = True
+            else:
+                state.pop("archive_down", None)
             if job.full_archive:
                 # Failed reads count too: their files are on disk all the same
                 state["archive_bytes"] = (state.get("archive_bytes") or 0) + (getattr(job, "bytes_written", 0) or 0)
@@ -563,14 +661,13 @@ class BaselineScheduler:
                 skipped = f"; {failed} posts that failed above it aren't read again" if failed else ""
                 logger.warning(
                     f"Whole archive of u/{user['name']} failed ({state['last_error']}); it carries on below "
-                    f"{time.strftime('%Y-%m-%d', time.gmtime(job.oldest_post))} in {self.settings['retry_hours']} "
-                    f"hours{skipped}"
+                    f"{time.strftime('%Y-%m-%d', time.gmtime(job.oldest_post))} {later}{skipped}"
                 )
             else:
                 state["last_error"] = job.error or f"job {job.state}"
                 logger.warning(
-                    f"Baseline for u/{user['name']} failed ({state['last_error']}); the same window is read again in "
-                    f"{self.settings['retry_hours']} hours"
+                    f"Baseline for u/{user['name']} failed ({state['last_error']}); the same window is read "
+                    f"again {later}"
                 )
             state["last_counts"] = dict(job.counts)
             self._pending = None
@@ -639,6 +736,10 @@ class BaselineScheduler:
                         "next_check": self._next_check(user, state) if checked else None,
                         "newest_post": state.get("newest_post"),
                         "hibernating": self._hibernating(state, now),
+                        # Turned off in the dashboard: nothing reads the user's archive
+                        "archive_off": state.get("archive_off"),
+                        # The userscript can't read the user's posts on Reddit (since when): only the archive has them
+                        "hidden_on_reddit": state.get("hidden_on_reddit"),
                         **({"alias_of": user["alias_of"]} if "alias_of" in user else {}),
                         # Due for another look on Reddit: the userscript reports what it finds
                         **({"gone": state["gone"]} if state.get("gone") else {}),
@@ -653,5 +754,7 @@ class BaselineScheduler:
                 "error": self.error,
                 "free_bytes": free,
                 "low_disk": free is not None and free < self.settings["min_free_gb"] * GB,
+                # Arctic Shift is down: nothing is queued until `until`, then one request tries it
+                "archive_down": self.server.archive_outage.snapshot(),
                 **self.settings,
             }

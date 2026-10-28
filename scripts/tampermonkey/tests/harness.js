@@ -99,6 +99,8 @@ class Harness {
             json: { name: new URL(request.url).searchParams.get("name"), watchlist: true, watched: null, folder: "someone", downloads: null },
         }));
         this.serve("POST", "/watchlist/gone", (request) => ({ json: request.data }));
+        this.serve("POST", "/sync", (request) => ({ json: request.data }));
+        this.serve("POST", "/watchlist/hidden", (request) => ({ json: { user: request.data.user, hidden_on_reddit: request.data.hidden ? 1 : null } }));
         this.serve("POST", "/watchlist/reddit", (request) => ({ json: { user: request.data.user, reddit_read: 1 } }));
         return this;
     }

@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bdfr.arctic_shift import ArcticShift, read_post_json, submission_id_from_link
-from bdfr.exceptions import ArcticShiftError
+from bdfr.arctic_shift import ArcticShift, Outage, read_post_json, submission_id_from_link
+from bdfr.exceptions import ArcticShiftDown, ArcticShiftError
 
 
 def make_post(post_id: str, created_utc: int, url: str = None) -> dict:
@@ -105,6 +105,43 @@ def test_every_attempt_is_reported(mock_sleep: MagicMock, arctic_shift: ArcticSh
     ]
     assert reported[0]["detail"] == "author=someone, limit=1"
     assert reported[2]["lookups"] == {"gallery (removed)": 1}
+
+
+@patch("bdfr.arctic_shift.time.sleep")
+def test_outage_pauses_requests_then_tries_once(mock_sleep: MagicMock, arctic_shift: ArcticShift):
+    now = [1000.0]
+    arctic_shift.outage = Outage(clock=lambda: now[0])
+    arctic_shift.session.get.return_value = make_response(status=500, error="Internal server error")
+    with pytest.raises(ArcticShiftDown, match="after 5 attempts"):
+        list(arctic_shift.submissions(author="someone"))
+    assert arctic_shift.session.get.call_count == 5
+    assert arctic_shift.outage.until == 1000 + Outage.FIRST_PAUSE
+
+    # No request during the pause, not even for another listing or a lookup
+    with pytest.raises(ArcticShiftDown, match="not asked again until"):
+        list(arctic_shift.submissions(author="someone_else"))
+    gallery = make_post("g", 100, "https://www.reddit.com/gallery/g")
+    with pytest.raises(ArcticShiftDown):
+        list(arctic_shift.submissions_from_posts([gallery]))
+    assert arctic_shift.session.get.call_count == 5
+
+    # Then one attempt; a failed one doubles the pause, up to MAX_PAUSE
+    now[0] += Outage.FIRST_PAUSE
+    with pytest.raises(ArcticShiftDown, match="after 1 attempt:"):
+        list(arctic_shift.submissions(author="someone"))
+    assert arctic_shift.session.get.call_count == 6
+    assert arctic_shift.outage.until == now[0] + 2 * Outage.FIRST_PAUSE
+    for _ in range(10):
+        now[0] = arctic_shift.outage.until
+        with pytest.raises(ArcticShiftDown):
+            list(arctic_shift.submissions(author="someone"))
+    assert arctic_shift.outage.until == now[0] + Outage.MAX_PAUSE
+
+    # An answer ends it
+    now[0] = arctic_shift.outage.until
+    arctic_shift.session.get.return_value = make_response([make_post("a", 100)])
+    assert [s.id for s in arctic_shift.submissions(author="someone", limit=1)] == ["a"]
+    assert not arctic_shift.outage.down and arctic_shift.outage.snapshot() is None
 
 
 def test_bad_request_raises(arctic_shift: ArcticShift):

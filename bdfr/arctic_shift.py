@@ -4,6 +4,7 @@
 import json
 import logging
 import re
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
@@ -15,10 +16,63 @@ from urllib.parse import urlsplit
 import requests
 
 from bdfr import __version__, logs
-from bdfr.exceptions import ArcticShiftError
+from bdfr.exceptions import ArcticShiftDown, ArcticShiftError
 from bdfr.post import Post
 
 logger = logging.getLogger(__name__)
+
+
+class Outage:
+    """Whether Arctic Shift is down, shared by every client that uses it (serve shares one between its jobs).
+
+    Once a request has failed every attempt, no request is made for FIRST_PAUSE; then one request with a single attempt
+    tries it again, and each one that fails doubles the pause, up to MAX_PAUSE. Any answer ends the outage. So an
+    outage costs one request per pause rather than every attempt of every job (each watched user's, in turn).
+    """
+
+    FIRST_PAUSE = 3600
+    MAX_PAUSE = 24 * 3600
+
+    def __init__(self, clock: Callable[[], float] = time.time):
+        self.clock = clock
+        # When it was found down, and no request before `until`; None when it isn't down
+        self.since: Optional[float] = None
+        self.until: Optional[float] = None
+        self.error: Optional[str] = None
+        self._pause = 0
+        self._lock = threading.Lock()
+
+    @property
+    def down(self) -> bool:
+        return self.since is not None
+
+    def paused_until(self) -> Optional[float]:
+        """When requests may be made again, while they may not; otherwise None"""
+        until = self.until
+        return until if until is not None and self.clock() < until else None
+
+    def failed(self, error: str):
+        with self._lock:
+            now = self.clock()
+            self._pause = self.FIRST_PAUSE if self.since is None else min(self._pause * 2, self.MAX_PAUSE)
+            if self.since is None:
+                self.since = now
+            self.until, self.error = now + self._pause, error
+        until = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.until))
+        logger.warning(f"Arctic Shift seems to be down ({error}); no requests until {until}, then one to try it")
+
+    def answered(self):
+        with self._lock:
+            if self.since is None:
+                return
+            down_for = self.clock() - self.since
+            self.since = self.until = self.error = None
+            self._pause = 0
+        logger.info(f"Arctic Shift answers again (it was down for {down_for / 3600:.1f} hours)")
+
+    def snapshot(self) -> Optional[dict]:
+        """For GET /status and /watchlist: None, or when it was found down, until when it's paused, and why"""
+        return {"since": self.since, "until": self.until, "error": self.error} if self.down else None
 
 
 class ArcticShift:
@@ -49,6 +103,8 @@ class ArcticShift:
         self.not_found: set[str] = set()
         # Called with a dict for every request attempt, failed ones included (serve's record of archive requests)
         self.on_request: Optional[Callable[[dict], None]] = None
+        # Whether the archive is down; serve replaces it with one its jobs share
+        self.outage = Outage()
         self._last_request = 0.0
 
     def submissions(
@@ -113,7 +169,7 @@ class ArcticShift:
                     self.not_found.update(missing)
                     logger.info(f"Arctic Shift doesn't have {len(missing)} of them: {', '.join(missing)}")
             else:
-                logger.info(f"All {len(batch)} posts have enough data to download; no Arctic Shift lookup needed")
+                logger.debug(f"All {len(batch)} posts have enough data to download; no Arctic Shift lookup needed")
             for post in batch:
                 data = found.get(post["id"])
                 if data is None:
@@ -174,11 +230,19 @@ class ArcticShift:
 
     def _get(self, endpoint: str, params: dict, reasons: Optional[Counter] = None) -> list[dict]:
         """reasons: for ID lookups, how many posts needed the archive for each reason"""
+        paused = self.outage.paused_until()
+        if paused is not None:
+            raise ArcticShiftDown(
+                f"Arctic Shift is down ({self.outage.error}); not asked again until "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(paused))}"
+            )
+        # While it's down, a single attempt tells whether it's back
+        attempts = 1 if self.outage.down else self.MAX_RETRIES + 1
         error = None
-        for attempt in range(self.MAX_RETRIES + 1):
+        for attempt in range(attempts):
             if attempt:
                 delay = self._retry_delay(error, attempt)
-                logger.warning(f"Arctic Shift request failed ({error[0]}), retrying in {delay} seconds")
+                logger.debug(f"Retrying in {delay} seconds")
                 time.sleep(delay)
             wait = self._last_request + self.MIN_REQUEST_INTERVAL - time.monotonic()
             if wait > 0:
@@ -205,6 +269,7 @@ class ArcticShift:
                 data = payload.get("data") or []
                 logger.info(f"{described} -> {len(data)} posts in {elapsed:.1f}s")
                 self._report(endpoint, params, reasons, attempt, 200, None, len(data), elapsed)
+                self.outage.answered()
                 return data
             if response.status_code == 200 and not valid:
                 message = "the answer was not Arctic Shift's JSON"
@@ -218,8 +283,11 @@ class ArcticShift:
                 or (response.status_code == 200 and not valid)
             )
             if not retryable:
+                self.outage.answered()
                 raise ArcticShiftError(f"Arctic Shift rejected the request: {error[0]}")
-        raise ArcticShiftError(f"Arctic Shift request failed after {self.MAX_RETRIES + 1} attempts: {error[0]}")
+        self.outage.failed(error[0])
+        noun = "attempt" if attempts == 1 else "attempts"
+        raise ArcticShiftDown(f"Arctic Shift request failed after {attempts} {noun}: {error[0]}")
 
     def _report(
         self,
@@ -275,7 +343,7 @@ class ArcticShift:
                 f"{len(self.looked_up)} posts looked up: " + ", ".join(f"{n} {reason}" for reason, n in counts.items())
             )
         noun = "request" if self.request_count == 1 else "requests"
-        return f"Made {self.request_count} {noun} to Arctic Shift ({'; '.join(details)})"
+        return f"Made {self.request_count} {noun} to Arctic Shift" + (f" ({'; '.join(details)})" if details else "")
 
     @staticmethod
     def _retry_delay(error: tuple, attempt: int) -> int:

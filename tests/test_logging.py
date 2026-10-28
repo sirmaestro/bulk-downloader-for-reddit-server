@@ -24,13 +24,18 @@ from bdfr.resource import Resource
 CONTENT = {"https://i.redd.it/a.jpg": b"a", "https://i.redd.it/copy.jpg": b"a", "https://i.redd.it/c.jpg": b"c"}
 
 
+CREATED = 1792454400
+# The end of each post's line: when it was posted, in the log's local time
+POSTED = time.strftime("posted %Y-%m-%d %H:%M", time.localtime(CREATED))
+
+
 def post(post_id: str, url: str, **extra) -> dict:
     data = {
         "id": post_id,
         "title": f"title {post_id}",
         "author": "someone",
         "subreddit": "test",
-        "created_utc": 1792454400,
+        "created_utc": CREATED,
         "url": url,
     }
     return {**data, **extra}
@@ -143,10 +148,10 @@ def test_one_line_per_post(tmp_path: Path, caplog: pytest.LogCaptureFixture):
         with context_lines() as lines:
             make_downloader(tmp_path, posts).download()
         assert lines == [
-            "post aaa1111: new - 1 file written (#1, r/test, FakeDownloader)",
+            f"post aaa1111: new - 1 file written (#1, r/test, FakeDownloader, {POSTED})",
             "post bbb2222: duplicate - 1 same as already downloaded aaa1111_title aaa1111.jpg "
-            "(#2, r/test, FakeDownloader)",
-            "post ccc3333: skipped - score 1 is below --min-score 5 (#3, r/test)",
+            f"(#2, r/test, FakeDownloader, {POSTED})",
+            f"post ccc3333: skipped - score 1 is below --min-score 5 (#3, r/test, {POSTED})",
             "Finished 3 posts: 1 new, 0 already downloaded, 1 duplicate, 1 skipped, 0 failed; 1 file written",
             "Made no requests to Arctic Shift",
         ]
@@ -154,7 +159,7 @@ def test_one_line_per_post(tmp_path: Path, caplog: pytest.LogCaptureFixture):
         with context_lines() as lines:
             make_downloader(tmp_path, posts[:1]).download()
     # Known from its ID in the folder's file names, before anything is requested
-    assert "post aaa1111: already downloaded - files with its ID already in the folder (#1, r/test)" in lines
+    assert f"post aaa1111: already downloaded - files with its ID already in the folder (#1, r/test, {POSTED})" in lines
 
 
 class FailingDownloader(FakeDownloader):
@@ -166,7 +171,7 @@ def test_failed_posts_are_warnings(tmp_path: Path):
     with patch("bdfr.downloader.DownloadFactory.pull_lever", return_value=FailingDownloader):
         with context_lines(logging.WARNING) as lines:
             make_downloader(tmp_path, [post("aaa1111", "https://i.redd.it/a.jpg")]).download()
-    assert lines == ["post aaa1111: failed - HTTP 404 (#1, r/test, FailingDownloader)"]
+    assert lines == [f"post aaa1111: failed - HTTP 404 (#1, r/test, FailingDownloader, {POSTED})"]
 
 
 @pytest.mark.parametrize("parallel", (1, 4))

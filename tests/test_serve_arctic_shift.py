@@ -113,6 +113,29 @@ def test_failed_listing_fails_the_job(serve: DownloadServer, archive: MockArctic
     assert files(serve, "someone") == []
 
 
+def test_jobs_make_no_requests_while_arctic_shift_is_down(serve: DownloadServer, archive: MockArcticShift):
+    """Once a request failed every attempt, the next jobs fail without asking until the pause is over; then one
+    attempt tries it"""
+    archive.add_post("abc0001", NOW)
+    archive.fail("posts/search", status=500, error="Internal server error", times=6)
+    job = run(serve, {"folder": "first", "user": "first", "archive": "all"})
+    assert job.state == "failed" and "after 5 attempts" in job.error
+    assert len(archive.requests) == 5
+    job = run(serve, {"folder": "second", "user": "second", "archive": "all"})
+    assert job.state == "failed" and "not asked again until" in job.error
+    assert len(archive.requests) == 5
+
+    serve.archive_outage.until = time.time() - 1
+    job = run(serve, {"folder": "second", "user": "second", "archive": "all"})
+    assert job.state == "failed" and "after 1 attempt:" in job.error
+    assert len(archive.requests) == 6
+
+    serve.archive_outage.until = time.time() - 1
+    job = run(serve, {"folder": "someone", "user": "someone", "archive": "all"})
+    assert job.state == "done" and len(files(serve, "someone")) == 1
+    assert serve.archive_outage.snapshot() is None
+
+
 def test_listing_failing_part_way_keeps_what_was_downloaded(serve: DownloadServer, archive: MockArcticShift):
     for number in range(5):
         archive.add_post(f"abc000{number}", NOW - number * 100)

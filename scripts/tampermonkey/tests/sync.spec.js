@@ -138,6 +138,26 @@ test("a sync stopped by known posts doesn't report reaching the end", async ({ c
     expect(harness.requestsTo("POST", `${SERVER}/watchlist/reddit`)).toEqual([]);
 });
 
+test("bdfr serve is told which browser checks, which jobs are the sync's, and what each run did", async ({ context }) => {
+    await setUp(context);
+    watch("someone");
+    someoneOnReddit();
+    const page = await harness.open("/");
+    await expect.poll(() => harness.requestsTo("POST", `${SERVER}/sync`).length, { timeout: 10000 }).toBe(1);
+    await syncFinished(page);
+    expect(harness.requestsTo("GET", WATCHLIST)[0].headers["X-BDFR-Sync"]).toMatch(/^(Chrome|browser)/);
+    expect(jobsFor("someone folder")[0].source).toBe("sync");
+    const report = harness.requestsTo("POST", `${SERVER}/sync`)[0].data;
+    expect(report).toMatchObject({ users: 1, sent: jobsFor("someone folder")[0].posts.length, failed: 0, gone: 0, forced: false, stopped: false });
+    expect(report.seconds).toBeGreaterThanOrEqual(0);
+
+    // A look that finds no user due reads nobody, so there's nothing to report
+    await harness.open("/");
+    await expect.poll(() => harness.requestsTo("GET", WATCHLIST).length, { timeout: 10000 }).toBe(2);
+    await syncFinished(page);
+    expect(harness.requestsTo("POST", `${SERVER}/sync`)).toHaveLength(1);
+});
+
 test("nothing new: no job is sent", async ({ context }) => {
     await setUp(context);
     watch("someone");
@@ -219,6 +239,21 @@ test("two tabs opened together sync once", async ({ context }) => {
     await first.waitForTimeout(2500);
     expect(harness.requestsTo("GET", SUBMITTED("someone"))).toHaveLength(2);
     expect(jobsFor("someone folder")).toHaveLength(1);
+});
+
+test("a tab left open looks for due users again, and syncs them once they're due", async ({ context }) => {
+    await setUp(context, { "bdfr-sync-check-every": 1500 });
+    watch("someone");
+    someoneOnReddit();
+    const page = await harness.open("/");
+    await expect.poll(() => jobsFor("someone folder").length, { timeout: 10000 }).toBe(1);
+    // Looks again, but someone was just synced
+    await expect.poll(() => harness.requestsTo("GET", WATCHLIST).length, { timeout: 10000 }).toBeGreaterThan(1);
+    expect(harness.requestsTo("GET", SUBMITTED("someone"))).toHaveLength(2);
+    // Due again (as if syncEveryHours had passed): synced by the same page, without a reload
+    await page.evaluate(() => GM_setValue("bdfr-sync", {}));
+    await expect.poll(() => jobsFor("someone folder").length, { timeout: 10000 }).toBe(2);
+    expect(harness.warnings()).toEqual([]);
 });
 
 test.describe("suspended or deleted accounts: recognised, checked again weekly", () => {
@@ -316,7 +351,7 @@ test.describe("suspended or deleted accounts: recognised, checked again weekly",
         });
     }
 
-    test("a 403 from a profile that isn't suspended (e.g. private) stays a failure", async ({ context }) => {
+    test("a 403 from a profile that isn't suspended: its posts are hidden, and bdfr serve is told once", async ({ context }) => {
         await setUp(context);
         watch("broken");
         harness.on("GET", SUBMITTED("broken"), { status: 403, json: { reason: "private", message: "Forbidden", error: 403 } });
@@ -324,8 +359,33 @@ test.describe("suspended or deleted accounts: recognised, checked again weekly",
         await syncFinished(page);
         const state = await page.evaluate(() => GM_getValue("bdfr-sync", {}));
         expect(state.broken.gone).toBeUndefined();
-        expect(state.broken.lastError).toContain("HTTP 403");
+        // Not a failure tried again hourly: synced as usual
+        expect(state.broken.lastError).toBeUndefined();
+        expect(state.broken.lastSuccess).toBeGreaterThan(0);
         expect(harness.requestsTo("GET", ABOUT("broken"))).toHaveLength(1);
+        expect(harness.requestsTo("POST", `${SERVER}/watchlist/hidden`).map((r) => r.data)).toEqual([{ user: "broken", hidden: true }]);
+        expect(harness.warnings()).toContainEqual("BDFR sync: u/broken's posts are hidden on Reddit (403)");
+    });
+
+    test("an empty listing is reported as hidden; posts showing again as readable; no change: nothing", async ({ context }) => {
+        await setUp(context);
+        const users = [
+            { name: "empty", folder: "empty folder" },
+            { name: "someone", folder: "someone folder", hidden_on_reddit: 1 },
+            { name: "still", folder: "still folder", hidden_on_reddit: 1 },
+        ];
+        harness.serve("GET", "/watchlist", { json: { enabled: true, users, gone: [] } });
+        for (const name of ["empty", "still"]) {
+            harness.on("GET", SUBMITTED(name), { json: { kind: "Listing", data: { children: [], after: null } } });
+        }
+        someoneOnReddit();
+        const page = await harness.open("/");
+        await expect.poll(() => jobsFor("someone folder").length, { timeout: 10000 }).toBe(1);
+        await syncFinished(page);
+        expect(harness.requestsTo("POST", `${SERVER}/watchlist/hidden`).map((r) => r.data)).toEqual([
+            { user: "empty", hidden: true },
+            { user: "someone", hidden: false },
+        ]);
     });
 });
 
@@ -429,7 +489,6 @@ test.describe("Reddit fails for one user: logged, the others still synced, retri
         ["logged out", { status: 200, body: fixture("reddit-login.html"), finalUrl: "https://old.reddit.com/login/?reason=lor2&dest=x" }, "Reddit asked to log in"],
         ["NSFW profile without the over-18 setting", { status: 200, body: "<html>over18</html>", finalUrl: "https://old.reddit.com/over18?dest=x" }, "over 18"],
         ["404 although the profile exists", { status: 404, json: { message: "Not Found", error: 404 } }, "HTTP 404"],
-        ["private or banned profile", { status: 403, json: { reason: "banned", message: "Forbidden", error: 403 } }, "HTTP 403"],
         ["rate limited, still after retries", { status: 429, body: fixture("reddit-429.html"), headers: { "x-ratelimit-reset": "0.2" } }, "HTTP 429"],
         ["unreachable", { network: "error" }, "couldn't be reached"],
         ["too slow", { network: "timeout" }, "didn't answer in time"],

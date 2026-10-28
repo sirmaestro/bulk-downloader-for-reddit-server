@@ -10,6 +10,12 @@ class ArcticShiftError(BulkDownloaderException):
     pass
 
 
+class ArcticShiftDown(ArcticShiftError):
+    """Arctic Shift failed every attempt at a request, or is paused after one that did (see arctic_shift.Outage)"""
+
+    pass
+
+
 class SiteDownloaderError(BulkDownloaderException):
     pass
 

@@ -242,7 +242,7 @@ class HashStore:
             logger.info(f"Calculating hashes for {len(files)} files not in the hash store yet")
             results = hash_files(files)
         else:
-            logger.debug("Every file in the download folder is already in the hash store")
+            logger.log(logs.TRACE, "Every file in the download folder is already in the hash store")
             results = []
 
         hash_list = {res[1]: res[0] for res in results}

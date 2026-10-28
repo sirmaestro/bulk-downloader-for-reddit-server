@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BDFR downloader
 // @namespace    bdfr-saved-hashes
-// @version      4.16
+// @version      4.17
 // @description  Downloads the posts on old.reddit pages (also www.reddit.com in the old design) through `bdfr serve`, keeps watched users synced in the background, or collects posts as JSON for `bdfr download --post-json`
 // @match        https://old.reddit.com/*
 // @match        https://www.reddit.com/*
@@ -109,7 +109,9 @@
     // its posts answer 403 or 404) is reported to bdfr serve (POST /watchlist/gone). While its newest post is under
     // the watchlist's gone_active_days old, bdfr serve still lists it, marked gone, and it's synced as usual (a
     // temporary suspension or shadowban can be lifted); after that it's left out, and listed once more every
-    // gone_recheck_days for another look (an older bdfr serve without that: checked again weekly). Hibernating users (no post for the watchlist's
+    // gone_recheck_days for another look (an older bdfr serve without that: checked again weekly). A user whose posts
+    // can't be read while the account is there (403, or a listing with nothing in it: e.g. they hid their posts from
+    // their profile) is reported as hidden (POST /watchlist/hidden), and as readable again once posts show. Hibernating users (no post for the watchlist's
     // hibernate_days, by the server's or this script's newest post) are synced weekly: bdfr serve reads no weekly
     // archive windows for them, so this free check of Reddit is what notices them posting again. Aliases (old accounts) are
     // never synced. "Sync now" (the panel's Sync button, or Tampermonkey's menu on any page) syncs every watched user
@@ -117,7 +119,11 @@
     // button, the tab closed, bdfr serve down) is carried on by the next one, skipping the users it already synced.
     // Reddit's rate limit (its x-ratelimit-* headers) is followed: the sync waits for the limit to reset rather than
     // run into it, and waits and retries when Reddit answers 429 anyway. Waits use a worker's timer, which browsers
-    // don't slow down in background tabs as they do the page's.
+    // don't slow down in background tabs as they do the page's. A tab looks for due users as it loads, and then every
+    // SYNC_CHECK_KEY milliseconds while it stays open, unless another tab looked meanwhile, so a browser left open on
+    // one old.reddit page keeps its users synced. bdfr serve logs when these looks start again after a gap (the
+    // watchlist is read with X-BDFR-Sync, naming the browser), and gets a report of each run that read users
+    // (POST /sync), so its log shows when the sync ran and when no browser was syncing.
     // user (lower case) -> { lastSuccess, lastSent, newestPost }, { lastError, lastAttempt } or { gone, lastAttempt }
     const SYNC_STATE_KEY = "bdfr-sync";
     // { owner: tab, until: time, page: its address, status: its progress } while a tab syncs
@@ -125,6 +131,9 @@
     const SYNC_TITLE_MARK = "⟳ "; // starts the syncing tab's title while it syncs a user, so it can be found
     const SYNC_GAP_KEY = "bdfr-sync-request-gap"; // milliseconds between requests to Reddit
     const SYNC_RUN_KEY = "bdfr-sync-run"; // { started } while a Sync now hasn't got through every user
+    const SYNC_CHECK_KEY = "bdfr-sync-check-every"; // milliseconds between an open tab's looks for due users
+    const SYNC_CHECKED_KEY = "bdfr-sync-checked"; // when a tab last looked for due users
+    const SYNC_CHECK_EVERY_MS = 15 * 60 * 1000;
     const SYNC_RUN_RESUME_MS = 24 * 3600 * 1000; // an unfinished Sync now older than this starts again from the top
     const SYNC_RATE_RESERVE = 3; // requests left in Reddit's rate limit window at which the sync waits for its reset
     const SYNC_RATE_LIMITED_RETRIES = 3; // 429 answers in a row before a user counts as failed
@@ -148,8 +157,20 @@
     // Where a sync started with "Sync now" reports its progress: the panel's status line on pages with the panel
     let reportSync = (text) => console.info(`BDFR sync: ${text}`);
 
-    if (SETTINGS.backgroundSync) setTimeout(backgroundSync, SYNC_START_DELAY_MS);
+    if (SETTINGS.backgroundSync) setTimeout(syncWhileOpen, SYNC_START_DELAY_MS);
     if (typeof GM_registerMenuCommand === "function") GM_registerMenuCommand("Sync watched users now", syncNow);
+
+    // Looks for due users as the page loads, then again every SYNC_CHECK_KEY milliseconds unless another tab did
+    async function syncWhileOpen() {
+        for (let first = true; ; first = false) {
+            const every = GM_getValue(SYNC_CHECK_KEY, SYNC_CHECK_EVERY_MS);
+            if (first || Date.now() - GM_getValue(SYNC_CHECKED_KEY, 0) >= every) {
+                GM_setValue(SYNC_CHECKED_KEY, Date.now());
+                await backgroundSync();
+            }
+            await sleep(every);
+        }
+    }
 
     // Starts a sync of every watched user, or carries on an unfinished one. While this tab syncs, stops it after the
     // current user instead.
@@ -178,10 +199,11 @@
             show(text);
         };
         syncProgress = report;
+        const started = Date.now();
         try {
             let watchlist;
             try {
-                watchlist = await request("GET", "/watchlist");
+                watchlist = await request("GET", "/watchlist", null, { "X-BDFR-Sync": browserName() });
             } catch (error) {
                 console.warn(`BDFR sync: couldn't read the watchlist: ${describeError(error)}`);
                 return report(`Couldn't read the watchlist: ${describeError(error)}`);
@@ -219,6 +241,7 @@
                 }
                 if (force ? doneInRun(last) : !syncDue(last, user, hibernateMs, Date.now())) continue;
                 if (stopSync) {
+                    await reportRun({ users: synced + failed + gone, sent: sentTotal, failed, gone, started, force, stopped: true });
                     return report(`Sync stopped: ${carriedOver + synced + gone} of ${users.length} users done · `
                         + `${sentTotal} new posts sent · Sync carries on from u/${user.name}`);
                 }
@@ -226,15 +249,22 @@
                 report(`Syncing u/${user.name} (${index + 1}/${users.length})…`);
                 let serverDown = null;
                 try {
-                    const { sent, newest } = await syncUser(user);
+                    const { sent, newest, empty } = await syncUser(user);
                     syncState[key] = { lastSuccess: Date.now(), lastSent: sent, newestPost: newest || last.newestPost };
                     synced += 1;
                     sentTotal += sent;
                     if (sent) console.info(`BDFR sync: u/${user.name}: sent ${sent} new posts to bdfr serve`);
                     if (user.gone) await reportGone(user.name, null); // listed again for a recheck: there after all
+                    if (empty !== Boolean(user.hidden_on_reddit)) await reportHidden(user.name, empty);
                 } catch (error) {
                     const reason = [403, 404].includes(error.status) ? await accountGone(user.name) : null;
-                    if (reason) {
+                    if (!reason && error.status === 403) {
+                        // The account is there but its posts can't be read: only the archive has them
+                        syncState[key] = { lastSuccess: Date.now(), lastSent: 0, newestPost: last.newestPost };
+                        synced += 1;
+                        console.warn(`BDFR sync: u/${user.name}'s posts are hidden on Reddit (403)`);
+                        if (!user.hidden_on_reddit) await reportHidden(user.name, true);
+                    } else if (reason) {
                         gone += 1;
                         console.warn(`BDFR sync: u/${user.name} is ${reason} on Reddit; not synced until bdfr serve `
                             + "lists it again");
@@ -252,6 +282,7 @@
                 if (serverDown) return report(`Sync stopped: ${describeError(serverDown)}`);
             }
             if (run) GM_setValue(SYNC_RUN_KEY, null);
+            await reportRun({ users: synced + failed + gone, sent: sentTotal, failed, gone, started, force, stopped: false });
             report(`Synced ${synced} watched users · ${sentTotal} new posts sent`
                 + (gone ? ` · ${gone} suspended or deleted` : "")
                 + (failed ? ` · ${failed} failed (console, F12)` : "")
@@ -317,6 +348,42 @@
         }
     }
 
+    // Tells bdfr serve what a sync run that read users did, for its log. A failure (an older bdfr serve without POST
+    // /sync answers 404) is logged by request() and otherwise ignored.
+    async function reportRun({ users, sent, failed, gone, started, force, stopped }) {
+        if (!users) return;
+        try {
+            await request("POST", "/sync", {
+                users, sent, failed, gone, stopped, forced: force,
+                seconds: Math.round((Date.now() - started) / 1000),
+                browser: browserName(),
+            });
+        } catch (error) {
+            // logged
+        }
+    }
+
+    // The browser this runs in, e.g. "Firefox on Windows", so bdfr serve's log says which device synced
+    function browserName() {
+        const agent = navigator.userAgent;
+        const browser = /Edg\//.test(agent) ? "Edge" : /Firefox\//.test(agent) ? "Firefox"
+            : /Chrome\//.test(agent) ? "Chrome" : /Safari\//.test(agent) ? "Safari" : "browser";
+        const system = /Android/.test(agent) ? "Android" : /iPhone|iPad/.test(agent) ? "iOS"
+            : /Windows/.test(agent) ? "Windows" : /Mac OS/.test(agent) ? "macOS" : /Linux/.test(agent) ? "Linux" : "";
+        return system ? `${browser} on ${system}` : browser;
+    }
+
+    // Tells bdfr serve whether a watched user's posts can be read on Reddit (hidden: they can't). A failure is logged by
+    // request() (an older bdfr serve without POST /watchlist/hidden answers 404) and otherwise ignored.
+    async function reportHidden(name, hidden) {
+        try {
+            await request("POST", "/watchlist/hidden", { user: name, hidden });
+            if (hidden) console.info(`BDFR sync: u/${name}'s posts are hidden on Reddit; told bdfr serve`);
+        } catch (error) {
+            // logged
+        }
+    }
+
     // Whether a user is due for the background sync: a failed one after an hour, a suspended or deleted one after a
     // week, a hibernating one (newest post older than hibernateMs) after a week, others after syncEveryHours
     function syncDue(last, user, hibernateMs, now) {
@@ -366,7 +433,8 @@
     // Reads the user's newest posts until SYNC_STOP_AFTER_KNOWN downloaded ones in a row, and sends the new ones.
     // When bdfr serve asks for it (read_reddit_to_end: the user's whole archive is still to be read), reads the
     // listing to its end instead (Reddit lists the newest 1000 posts) and then tells it so, so the archive is only read
-    // for what Reddit can't show. Returns how many were sent, and when the user's newest post (of any kind) was made.
+    // for what Reddit can't show. Returns how many were sent, when the user's newest post (of any kind) was made, and
+    // whether the listing had nothing in it (the user's posts are hidden, or all deleted).
     async function syncUser(user) {
         const target = user.folder || user.name;
         const toEnd = Boolean(user.read_reddit_to_end);
@@ -417,12 +485,12 @@
             }
             after = listing.after;
         }
-        if (pending.length) await request("POST", "/jobs", { folder: target, posts: pending });
+        if (pending.length) await request("POST", "/jobs", { folder: target, posts: pending, source: "sync" });
         if (toEnd && reachedEnd) {
             await request("POST", "/watchlist/reddit", { user: user.name, oldest });
             console.info(`BDFR sync: u/${user.name}: Reddit read to its end; bdfr serve reads the rest from the archive`);
         }
-        return { sent: pending.length, newest };
+        return { sent: pending.length, newest, empty: listed === 0 };
     }
 
     // A post from Reddit's listing JSON in the form the page's posts are sent in, or null if it isn't downloaded
@@ -467,7 +535,7 @@
     }
 
     // After a user's posts answered 403 or 404: "suspended" or "deleted" if their profile (about.json) says so,
-    // otherwise null (the failure is something else, e.g. a private profile)
+    // otherwise null (the failure is something else: after a 403, posts hidden from the profile)
     async function accountGone(name) {
         let about;
         try {
@@ -848,7 +916,7 @@
 
     // Every failure is also logged to the browser console (as a warning starting "BDFR:"), so it's never only a
     // passing status line. The error's message is what describeError shows.
-    function request(method, path, body) {
+    function request(method, path, body, headers = {}) {
         return new Promise((resolve, reject) => {
             const fail = (message, detail, response) => {
                 response = response || {};
@@ -864,7 +932,7 @@
             GM_xmlhttpRequest({
                 method,
                 url: GM_getValue(SERVER_KEY, DEFAULT_SERVER) + path,
-                headers: { "Content-Type": "application/json", "X-BDFR-Token": GM_getValue(TOKEN_KEY, "") },
+                headers: { "Content-Type": "application/json", "X-BDFR-Token": GM_getValue(TOKEN_KEY, ""), ...headers },
                 data: body ? JSON.stringify(body) : undefined,
                 timeout: 30000,
                 onload: (response) => {

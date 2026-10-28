@@ -1,9 +1,9 @@
 // The dashboard of `bdfr serve` (served at /): reads GET /status, /jobs, /jobs/<id>, /watchlist, /requests, /retries,
 // /folders and /log with the token from this browser's storage. Reading only shows what serve already holds, so it never makes
-// serve ask Arctic Shift for anything. Three buttons change something: Continue raises a user's storage limit (POST
+// serve ask Arctic Shift for anything. Four buttons change something: Continue raises a user's storage limit (POST
 // /watchlist/continue; the scheduler then carries on reading their archive), Stop on a user ends their whole-archive
-// read for good (POST /watchlist/stop; weekly checks go on), and Stop on a post on the retry list gives up on it
-// (POST /retries/stop). Everything from the server is shown as text (textContent), never as HTML.
+// read for good (POST /watchlist/stop; weekly checks go on), Off/On turns a user's archive off altogether or back on
+// (POST /watchlist/archive), and Stop on a post on the retry list gives up on it (POST /retries/stop). Everything from the server is shown as text (textContent), never as HTML.
 "use strict";
 
 const TOKEN_KEY = "bdfr-dashboard-token";
@@ -299,7 +299,8 @@ function source(job) {
 function renderOverview() {
   const s = state.status || {};
   const w = state.watchlist;
-  const users = (w && w.users) || [];
+  const users = ((w && w.users) || []).filter((u) => !u.alias_of);
+  const aliases = ((w && w.users) || []).length - users.length;
   const running = state.jobs.find((job) => job.state === "running");
   const failedDay = state.jobs.filter((job) => job.state === "failed" && job.finished > Date.now() / 1000 - 86400);
   const retries = s.retries || {};
@@ -312,7 +313,13 @@ function renderOverview() {
     tile(
       "Watched users",
       w ? (w.enabled ? users.length : "off") : "…",
-      w && w.enabled ? `${users.filter((u) => u.hibernating).length} hibernating · ${(w.gone || []).length + users.filter((u) => u.gone).length} gone` : "",
+      w && w.enabled ? `${users.filter((u) => u.hibernating).length} hibernating · ${(w.gone || []).length + users.filter((u) => u.gone).length} gone${aliases ? ` · ${aliases} aliases` : ""}` : "",
+    ),
+    // The userscript's sync looks for due users every 15 minutes while a browser has old.reddit open
+    tile(
+      "Userscript sync",
+      s.sync && s.sync.checked ? relative(s.sync.checked) : "not since start",
+      s.sync && s.sync.last_run ? `${s.sync.browser} · last run ${relative(s.sync.last_run.time)}: ${s.sync.last_run.users} users, ${s.sync.last_run.sent} posts` : (s.sync && s.sync.browser) || "",
     ),
     tile("Up", s.started ? span(Date.now() / 1000 - s.started) : "–", `v${s.version || "?"}${s.notify ? " · notify on" : ""}`),
   );
@@ -474,18 +481,48 @@ function toggleSort(sort, key) {
 
 function userStatus(u) {
   const badges = [];
-  if (u.alias_of) badges.push(el("span", { class: "badge", title: "Old account: never checked" }, `alias of ${u.alias_of}`));
   if (u.gone) badges.push(el("span", { class: "badge bad" }, u.gone));
+  if (u.hidden_on_reddit) {
+    badges.push(
+      u.archive_off
+        ? el("span", { class: "badge bad", title: "The userscript can't read their posts on Reddit, and their archive is off: nothing downloads them" }, "posts hidden · archive off")
+        : el("span", { class: "badge warn", title: `The userscript can't read their posts on Reddit (since ${absolute(u.hidden_on_reddit)}): only the archive has them` }, "posts hidden"),
+    );
+  }
   if (u.hibernating) badges.push(el("span", { class: "badge", title: "No new posts in hibernate_days: no archive checks" }, "hibernating"));
   if (u.last_error) badges.push(el("span", { class: "badge bad", title: u.last_error }, "check failed"));
   if (!badges.length) badges.push(el("span", { class: "badge ok" }, "active"));
   return badges;
 }
 
-// Where the user's whole-archive read is, with Continue when it stopped (at its storage limit, or with Stop), and Stop
-// while it's still to come
+// The Archive column: "off" with On, or where the whole-archive read is with Off
 function archiveLabel(u) {
   if (u.alias_of) return el("span", { class: "muted" }, "–");
+  if (u.archive_off) {
+    const on = () => change("/watchlist/archive", { user: u.name, archive: true });
+    return [
+      el("span", { class: u.hidden_on_reddit ? "badge bad" : "badge", title: "Not read at all: only the userscript's posts are downloaded" }, "off"),
+      " ",
+      el("button", { onclick: on, title: "Read this user's archive again" }, "On"),
+    ];
+  }
+  return [archiveState(u), " ", archiveOff(u)];
+}
+
+// Turns the user's archive off altogether: no whole read, weekly checks or lookups, and the userscript's jobs into
+// their folder don't read it either
+function archiveOff(u) {
+  const off = () => {
+    const hidden = u.hidden_on_reddit ? " Their posts are hidden on Reddit, so nothing would download them." : "";
+    if (!confirm(`Turn u/${u.name}'s archive off? Only the userscript's posts are downloaded until it's turned on.${hidden}`)) return;
+    change("/watchlist/archive", { user: u.name, archive: false });
+  };
+  return el("button", { onclick: off, title: "Don't read this user's archive at all; rely on the userscript" }, "Off");
+}
+
+// Where the user's whole-archive read is, with Continue when it stopped (at its storage limit, or with Stop), and Stop
+// while it's still to come
+function archiveState(u) {
   const used = `${bytes(u.archive_bytes)} of ${u.archive_limit_gb} GB`;
   if (u.full_archive_done) return el("span", { class: "badge ok", title: `${bytes(u.archive_bytes)} written; weekly checks from now on` }, "complete");
   const carryOn = (suggested) => {
@@ -535,18 +572,22 @@ function renderWatchlist() {
     fill($("watch-gone"), "");
     return fill($("watch"), el("tr", {}, el("td", { class: "empty" }, "serve has no watchlist")));
   }
-  const settings = Object.entries(w).filter(([key]) => !["users", "gone", "enabled", "error", "free_bytes", "low_disk"].includes(key));
+  const settings = Object.entries(w).filter(([key]) => !["users", "gone", "enabled", "error", "free_bytes", "low_disk", "archive_down"].includes(key));
   fill(
     $("watch-settings"),
     settings.map(([key, value], i) => [i ? " · " : "", `${key} ${value}`]),
     w.free_bytes != null ? ` · ${bytes(w.free_bytes)} free` : "",
     w.low_disk ? el("div", { class: "error" }, `Archive reads are paused: under min_free_gb (${w.min_free_gb} GB) free`) : "",
+    w.archive_down
+      ? el("div", { class: "error" }, `Arctic Shift is down (${w.archive_down.error}) since `, when(w.archive_down.since), "; archive reads wait until ", when(w.archive_down.until), ", then one request tries it")
+      : "",
     w.error ? el("div", { class: "error" }, w.error) : "",
   );
 
   const filter = $("watch-filter").value.trim().toLowerCase();
-  const users = w.users.filter((u) => !filter || `${u.name} ${u.folder} ${u.alias_of || ""} ${u.last_error || ""}`.toLowerCase().includes(filter));
-  const statusRank = (u) => (u.last_error ? 0 : u.gone ? 1 : u.hibernating ? 3 : u.alias_of ? 4 : 2);
+  // Old accounts (aliases) are listed with the suspended and deleted ones below
+  const users = w.users.filter((u) => !u.alias_of && (!filter || `${u.name} ${u.folder} ${u.last_error || ""}`.toLowerCase().includes(filter)));
+  const statusRank = (u) => (u.last_error ? 0 : u.gone ? 1 : u.hibernating ? 3 : 2);
   const sorted = sortBy(users, state.watchSort, (u, key) => (key === "status" ? statusRank(u) : key === "name" || key === "folder" ? u[key].toLowerCase() : u[key]));
   const columns = [
     ["User", "name"],
@@ -582,20 +623,33 @@ function renderWatchlist() {
   );
 
   const gone = (w.gone || []).filter((g) => !filter || g.name.toLowerCase().includes(filter));
+  const aliases = w.users.filter((u) => u.alias_of && (!filter || `${u.name} ${u.folder} ${u.alias_of}`.toLowerCase().includes(filter)));
+  const rows = [
+    ...gone.map((g) => el("tr", {}, el("td", {}, userLink(g.name)), el("td", {}, el("span", { class: "badge bad" }, g.gone)), el("td", {}, when(g.recheck)))),
+    ...sortBy(aliases, { key: "name", asc: true }, (u) => u.name.toLowerCase()).map((u) =>
+      el(
+        "tr",
+        {},
+        el("td", {}, userLink(u.name)),
+        el("td", {}, el("span", { class: "badge", title: `Old account: its posts go in ${u.folder}; never checked or synced` }, `alias of ${u.alias_of}`)),
+        el("td", {}, el("span", { class: "muted" }, "never")),
+      ),
+    ),
+  ];
   fill(
     $("watch-gone"),
-    gone.length
+    rows.length
       ? [
-          el("h2", {}, `Suspended or deleted (${gone.length})`),
-          el("p", { class: "muted" }, "Left out of the userscript's sync until their recheck time."),
+          el("h2", {}, `Suspended, deleted or old accounts (${rows.length})`),
+          el("p", { class: "muted" }, "Suspended or deleted users are left out of the userscript's sync until their recheck time; old accounts (aliases) are never checked or synced."),
           el(
             "div",
             { class: "table-wrap" },
             el(
               "table",
               { class: "data" },
-              el("thead", {}, el("tr", {}, el("th", {}, "User"), el("th", {}, "Reported"), el("th", {}, "Recheck"))),
-              el("tbody", {}, gone.map((g) => el("tr", {}, el("td", {}, userLink(g.name)), el("td", {}, el("span", { class: "badge bad" }, g.gone)), el("td", {}, when(g.recheck))))),
+              el("thead", {}, el("tr", {}, el("th", {}, "User"), el("th", {}, "Status"), el("th", {}, "Recheck"))),
+              el("tbody", {}, rows),
             ),
           ),
         ]

@@ -12,6 +12,7 @@ import time
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,6 +38,8 @@ class FakeDownloader:
     oldest_listed = None
     # (post ID, result, label) reported to the job by the next runs
     results = []
+    # The next runs find Arctic Shift down (every attempt failed); otherwise they're answered
+    archive_down = False
 
     def __init__(self, args: Configuration, log_file: bool = True):
         self.log_file = log_file
@@ -48,11 +51,17 @@ class FakeDownloader:
         self.stop_reason = FakeDownloader.stop_reason
         self.oldest_listed = FakeDownloader.oldest_listed
         self.failed_posts = {}
+        self.arctic_shift = SimpleNamespace(outage=None, on_request=None)
 
     def download(self):
         FakeDownloader.runs.append(self.args)
         for result in FakeDownloader.results:
             self.progress_callback(*result)
+        if FakeDownloader.archive_down:
+            self.arctic_shift.outage.failed("Internal server error")
+            self.errors.append("Arctic Shift request failed after 5 attempts: Internal server error")
+        else:
+            self.arctic_shift.outage.answered()
         if FakeDownloader.gate is not None:
             assert FakeDownloader.gate.wait(10), "the test never released the job"
 
@@ -78,6 +87,7 @@ def serve(tmp_path: Path):
     FakeDownloader.newest_post = None
     FakeDownloader.bytes_written, FakeDownloader.stop_reason, FakeDownloader.oldest_listed = 0, None, None
     FakeDownloader.results = []
+    FakeDownloader.archive_down = False
     with patch("bdfr.server.Downloader", FakeDownloader):
         yield DownloadServer(Configuration(), tmp_path / "root", "token")
 
@@ -178,6 +188,8 @@ def test_settings_and_folders(serve, tmp_path, clock):
             "next_check": START + 4 * DAY,
             "newest_post": None,
             "hibernating": False,
+            "archive_off": None,
+            "hidden_on_reddit": None,
         }
     ]
 
@@ -445,6 +457,107 @@ def test_no_archive_is_read_while_the_disk_is_nearly_full(serve, tmp_path, clock
     assert FakeDownloader.runs[-1].stop_at_bytes == 7 * GB
 
 
+def test_a_user_with_the_archive_off_is_never_read_from_it(serve, tmp_path, clock, caplog):
+    """Turned off in the dashboard: no whole read, windows or lookups, and the userscript's jobs into the folder don't
+    read the archive either; turned on again, the user is checked as before"""
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
+    write_removed_galleries(tmp_path / "root" / "someone", {"unavailable:gal0001": "nodata:removed by Reddit"})
+    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock)
+    with caplog.at_level(logging.INFO):
+        assert serve.set_archive({"user": "Someone", "archive": False}) == {"user": "someone", "archive_off": START}
+    assert "u/someone's archive is off" in caplog.text
+    for _ in range(3):
+        tick(scheduler, serve)
+        clock.now += 8 * DAY
+    assert FakeDownloader.runs == []
+    user = scheduler.snapshot()["users"][0]
+    assert user["archive_off"] == START and user["checked"] is False and user["next_check"] is None
+
+    page = {"id": "gal0002", "url": "https://www.reddit.com/gallery/gal0002"}
+    serve.submit({"folder": "someone", "user": "someone", "posts": [page]})
+    serve.submit({"folder": "someone", "posts": [page]})
+    serve.submit({"folder": "other", "posts": [page]})
+    settle(serve)
+    assert [(run.user, run.archive_lookups) for run in FakeDownloader.runs] == [([], False), ([], False), ([], True)]
+
+    serve.set_archive({"user": "someone", "archive": True})
+    assert "archive_off" not in scheduler.state["someone"]
+    tick(scheduler, serve)
+    assert len(FakeDownloader.runs) == 4  # the lookups first, as usual
+
+    with pytest.raises(ValueError):
+        serve.set_archive({"user": "someone", "archive": "no"})
+    with pytest.raises(ValueError):
+        serve.set_archive({"user": "stranger", "archive": False})
+
+
+def test_a_check_queued_before_the_archive_was_turned_off_records_nothing(serve, tmp_path, clock):
+    """It runs without reading the archive, so the window (or whole read) stays where it was, and turned on again the
+    user carries on from there rather than from when the empty job ran"""
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [seeded, fresh]\n")
+    seeded = {"last_attempt": START - 8 * DAY, "last_success": START - 8 * DAY, "window_end": START - 8 * DAY}
+    seeded["full_archive_done"] = START - 30 * DAY
+    (tmp_path / "watchlist_state.json").write_text(json.dumps({"users": {"seeded": seeded}}), encoding="utf-8")
+    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock)
+    for name in ("seeded", "fresh"):
+        FakeDownloader.gate = gate = threading.Event()
+        serve.submit({"folder": "elsewhere", "posts": [{"id": "abc0001", "url": "https://i.redd.it/x.jpg"}]})
+        deadline = time.time() + 10
+        while not serve.current and time.time() < deadline:
+            time.sleep(0.01)
+        scheduler.tick()  # queued behind the running job
+        assert scheduler._pending == name
+        serve.set_archive({"user": name, "archive": False})
+        gate.set()
+        settle(serve)
+        clock.now += BaselineScheduler.PAUSE_SECONDS
+    FakeDownloader.gate = None
+    assert [run.user for run in FakeDownloader.runs] == [[], [], [], []]  # neither listing was read
+    assert scheduler.state["seeded"]["window_end"] == START - 8 * DAY
+    assert scheduler.state["seeded"]["last_success"] == START - 8 * DAY
+    assert not scheduler.state["fresh"].get("full_archive_done") and not scheduler.state["fresh"].get("window_end")
+
+    for name in ("seeded", "fresh"):
+        serve.set_archive({"user": name, "archive": True})
+    tick(scheduler, serve)
+    clock.now += BaselineScheduler.PAUSE_SECONDS
+    tick(scheduler, serve)
+    reads = [(run.user, run.listing_after) for run in FakeDownloader.runs[4:]]
+    assert reads == [(["seeded"], START - 15 * DAY), (["fresh"], None)]
+
+
+def test_a_user_whose_posts_are_hidden_on_reddit_never_hibernates(serve, tmp_path, clock, caplog):
+    """The userscript can't see them post again, so the weekly windows go on; their whole archive is read without
+    waiting for the userscript to read a listing it can't"""
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
+    serve.scheduler = scheduler = make_scheduler(serve, tmp_path, clock, reddit_read=False)
+    serve.notifier = MagicMock()
+    with caplog.at_level(logging.INFO):
+        assert serve.note_hidden({"user": "someone", "hidden": True}) == {"user": "someone", "hidden_on_reddit": START}
+    assert "u/someone's posts are hidden on Reddit" in caplog.text
+    FakeDownloader.newest_post = START - 90 * DAY
+    tick(scheduler, serve)
+    assert FakeDownloader.runs[-1].listing_after is None  # the whole archive
+    clock.now += 7 * DAY
+    tick(scheduler, serve)
+    assert len(FakeDownloader.runs) == 2  # a weekly window, though the newest post is 97 days old
+    user = scheduler.snapshot()["users"][0]
+    assert user["hidden_on_reddit"] == START and user["hibernating"] is False
+    serve.notifier.notify.assert_not_called()
+
+    # Hidden with the archive off: nothing downloads their posts, which is worth a notification
+    serve.note_hidden({"user": "someone", "hidden": False})
+    serve.set_archive({"user": "someone", "archive": False})
+    with caplog.at_level(logging.WARNING):
+        serve.note_hidden({"user": "someone", "hidden": True})
+    assert "nothing downloads their posts" in caplog.text
+    serve.notifier.notify.assert_called_once()
+    serve.note_hidden({"user": "someone", "hidden": False})
+    assert scheduler.snapshot()["users"][0]["hidden_on_reddit"] is None
+    with pytest.raises(ValueError):
+        serve.note_hidden({"user": "someone"})
+
+
 def test_a_window_stopped_by_a_full_disk_is_read_again(serve, tmp_path, clock):
     write_watchlist(tmp_path / "watchlist.yaml", "users: [someone]\n")
     scheduler = make_scheduler(serve, tmp_path, clock)
@@ -580,6 +693,50 @@ def test_failed_run_keeps_window_and_retries_later(serve, tmp_path, clock, caplo
     # The failed window is read again, from the last successful run
     assert FakeDownloader.runs[-1].listing_after == START - 7 * DAY
     assert scheduler.snapshot()["users"][0]["last_error"] is None
+
+
+def test_nothing_is_queued_while_arctic_shift_is_down(serve, tmp_path, clock, caplog):
+    """An outage costs one failed job, not one per user per day: the others wait, and the failed user is read again as
+    soon as the archive answers, not retry_hours after its failure"""
+    serve.archive_outage.clock = clock
+    write_watchlist(tmp_path / "watchlist.yaml", "users: [first, second, third]\n")
+    scheduler = make_scheduler(serve, tmp_path, clock)
+    for _ in range(3):  # their whole archives
+        tick(scheduler, serve)
+        clock.now += scheduler.PAUSE_SECONDS
+    assert len(FakeDownloader.runs) == 3
+
+    clock.now += 7 * DAY
+    FakeDownloader.archive_down = True
+    with caplog.at_level(logging.INFO):
+        tick(scheduler, serve)
+    assert "read again once Arctic Shift answers" in caplog.text
+    assert len(FakeDownloader.runs) == 4
+    snapshot = scheduler.snapshot()
+    assert snapshot["archive_down"]["until"] == clock.now + serve.archive_outage.FIRST_PAUSE
+    assert serve.status()["archive_down"] == snapshot["archive_down"]
+    for _ in range(10):  # the pause
+        clock.now += 300
+        tick(scheduler, serve)
+    assert len(FakeDownloader.runs) == 4
+
+    # Paused again after the job trying it fails, for twice as long
+    clock.now += 600
+    tick(scheduler, serve)
+    assert len(FakeDownloader.runs) == 5
+    assert serve.archive_outage.until == clock.now + 2 * serve.archive_outage.FIRST_PAUSE
+
+    FakeDownloader.archive_down = False
+    clock.now += 2 * serve.archive_outage.FIRST_PAUSE
+    for _ in range(3):
+        tick(scheduler, serve)
+        clock.now += scheduler.PAUSE_SECONDS
+    # The user whose window failed first (well within retry_hours of the failures), then the others
+    assert [run.user for run in FakeDownloader.runs[3:]] == [["first"], ["first"], ["first"], ["second"], ["third"]]
+    snapshot = scheduler.snapshot()
+    assert snapshot["archive_down"] is None
+    assert all(user["last_error"] is None for user in snapshot["users"])
+    assert "archive_down" not in scheduler.state["first"]
 
 
 def test_never_successful_user_retries_whole_archive(serve, tmp_path, clock):

@@ -431,7 +431,8 @@ class Downloader(Connector):
 
     def _log_outcome(self, number: int, submission: Post, result: Optional[bool], outcome: dict):
         """One line per submission saying what happened to it and why, e.g. `new - 1 file written (#1, r/pics,
-        Direct)`; a warning when it failed. The per-file lines are debug."""
+        Direct, posted 2026-10-27 14:05)`; a warning when it failed. The per-file lines are debug, or trace where this
+        line already says the same."""
         files = outcome["files"]
         parts = []
         if files["written"]:
@@ -463,6 +464,10 @@ class Downloader(Connector):
             details.append(f"r/{submission.subreddit}")
         if outcome["module"]:
             details.append(outcome["module"])
+        created = getattr(submission, "created_utc", None)
+        if isinstance(created, (int, float)) and not isinstance(created, bool) and created > 0:
+            # How long posts last before their media goes is what the sync's timing rests on
+            details.append(f"posted {time.strftime('%Y-%m-%d %H:%M', time.localtime(created))}")
         label = self.log_label(result, outcome)
         with logs.post_context(submission.id):
             logger.log(
@@ -537,7 +542,7 @@ class Downloader(Connector):
                 return False
             known = self._check_url_exists_or_add(link, None) or link in self._run_urls()
         if known:
-            logger.debug(f"Its link was downloaded before: {link}")
+            logger.log(logs.TRACE, f"Its link was downloaded before: {link}")
             self._files["known_link"] += 1
         return known
 
@@ -604,7 +609,7 @@ class Downloader(Connector):
             self._files["filtered"] += 1
             return False
         if self._check_url_exists_or_add(res.url, None) or res.url in self._run_urls():
-            logger.debug(f"Downloaded before: {res.url}")
+            logger.log(logs.TRACE, f"Downloaded before: {res.url}")
             if not self._rename_existing(self._get_url_hash(res.url), destination, submission):
                 self._files["known_link"] += 1
             self._run_urls().add(res.url)
@@ -625,7 +630,7 @@ class Downloader(Connector):
                 if event is None:
                     in_flight[res.url] = threading.Event()
                     return None
-            logger.debug(f"Waiting for {res.url}, which another post is downloading")
+            logger.log(logs.TRACE, f"Waiting for {res.url}, which another post is downloading")
             event.wait()
 
     def _release(self, url: str):
@@ -687,7 +692,7 @@ class Downloader(Connector):
         try:
             downloader_class = DownloadFactory.pull_lever(submission.url)
             downloader = downloader_class(submission, self.args)
-            logger.debug(f"{downloader_class.__name__}: {submission.url}")
+            logger.log(logs.TRACE, f"{downloader_class.__name__}: {submission.url}")
         except errors.NotADownloadableLinkError:
             return self._unavailable(f"no downloader for {submission.url}")
         self._module = downloader_class.__name__
@@ -754,7 +759,7 @@ class Downloader(Connector):
                         if self.args.no_dupes:
                             hashed_item = self._get_hashed_item(resource_hash)
                             existing_name = Path(hashed_item).name if hashed_item else "(unknown file)"
-                            logger.debug(f"Same content as {existing_name}: {res.url}")
+                            logger.log(logs.TRACE, f"Same content as {existing_name}: {res.url}")
                             self._files["duplicate"] += 1
                             self._duplicates_of.append(existing_name)
                             self._state()["duplicate_hash"] = resource_hash

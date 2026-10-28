@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -36,6 +37,7 @@ class FakeDownloader:
         self.newest_post = self.oldest_listed = self.stop_reason = None
         self.bytes_written = 0
         self.failed_posts = {}
+        self.arctic_shift = SimpleNamespace(outage=None, on_request=None)
 
     def download(self):
         post_ids = []
@@ -244,6 +246,7 @@ def test_retry_failed_option(tmp_path: Path, arguments: list, expected: bool):
         ({"user": "x", "full_archive": True}, "userscript", "Download: whole archive"),
         ({"user": "x"}, "userscript", "Download: new posts in archive"),
         ({"posts": [{}]}, "userscript", "userscript posts: lookups"),
+        ({"posts": [{}], "sync": True}, "userscript", "userscript sync: lookups"),
     ),
 )
 def test_job_origin_and_purpose(fields: dict, origin: str, purpose: str):
@@ -776,3 +779,50 @@ def test_folders_endpoint(server, tmp_path: Path):
         "posts": 0,
     }
     assert folders["broken"]["store"] == "error"
+
+
+def test_sync_checks_are_logged_after_a_gap_and_runs_in_one_line(server, caplog):
+    """The userscript's sync checks for due users every 15 minutes while a browser has old.reddit open: the log says
+    when they start again after a gap (no browser meanwhile), and what each run that read users did"""
+    download_server, base = server
+
+    def check():
+        req = urllib.request.Request(
+            base + "/watchlist", headers={"X-BDFR-Token": TOKEN, "X-BDFR-Sync": "Firefox on Windows"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            assert response.status == 200
+
+    with caplog.at_level(logging.INFO):
+        check()
+        check()
+        download_server.sync_checked -= 5 * 3600 + 12 * 60
+        check()
+        call(base, "GET", "/watchlist")  # the dashboard's reads aren't the sync's
+        status, body = call(
+            base,
+            "POST",
+            "/sync",
+            {"users": 12, "sent": 23, "failed": 1, "gone": 0, "seconds": 130, "browser": "Firefox on Windows"},
+        )
+    assert status == 200
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Userscript sync")]
+    assert lines == [
+        "Userscript sync: first check since serve started (Firefox on Windows)",
+        "Userscript sync: checking again after 5h 12m without a check (Firefox on Windows)",
+        "Userscript sync (background, Firefox on Windows): read 12 users, sent 23 new posts, 1 failed in 2m 10s",
+    ]
+    sync = call(base, "GET", "/status")[1]["sync"]
+    assert sync["browser"] == "Firefox on Windows" and sync["last_run"]["sent"] == 23
+    assert call(base, "POST", "/sync", {"users": -1})[0] == 400
+
+
+def test_sync_jobs_are_told_apart_from_downloads(server, caplog):
+    download_server, base = server
+    post = {"id": "abc0001", "url": "https://i.redd.it/x.jpg"}
+    with caplog.at_level(logging.INFO):
+        job = download_server.submit({"folder": "someone", "posts": [post], "source": "sync"})
+        page = download_server.submit({"folder": "someone", "posts": [post]})
+    assert job.sync and not page.sync
+    assert "Queued: 1 new posts from the userscript's sync into" in caplog.text
+    assert "Queued: 1 posts from a page into" in caplog.text
